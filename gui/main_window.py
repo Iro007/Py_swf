@@ -6,13 +6,15 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QMessageBox, QScrollArea,
     QSizePolicy, QStatusBar, QTableWidget, QTableWidgetItem, QStyle
 )
-from PySide6.QtGui import QAction, QPixmap, QImage, QFont, QKeySequence
+from PySide6.QtGui import QAction, QPixmap, QImage, QFont, QKeySequence, QPainter
 from PySide6.QtCore import Qt, QSize
+from PySide6.QtSvg import QSvgRenderer
 
 from py_swf.swf_parser import SWFFile, SWFTag, TAG_NAMES
 from py_swf.avm1 import disassemble_avm1, assemble_avm1
 from py_swf.avm2 import ABCFile, disassemble_instructions, assemble_instructions, build_method_mapping, resolve_multiname
 from py_swf.resources import export_image, replace_image
+from py_swf.shapes import shape_to_svg, SHAPE_TAG_TYPES
 from gui.abc_explorer import ABCExplorer
 from gui.editor import CodeEditor, AssemblyHighlighter
 
@@ -228,9 +230,34 @@ class MainWindow(QMainWindow):
         code_layout.addLayout(code_btn_layout)
 
         self.tabs.addTab(self.code_widget, "ActionScript")
+
+        # Tab 4: Shape Viewer (DefineShape/2/3/4) - added last, index kept stable at 4
+        self.shape_widget = QWidget()
+        shape_layout = QVBoxLayout(self.shape_widget)
+        shape_scroll_area = QScrollArea()
+        shape_scroll_area.setWidgetResizable(True)
+        shape_scroll_area.setAlignment(Qt.AlignCenter)
+        shape_scroll_area.setStyleSheet("background-color: #1e1e24; border: 1px solid #2d2d34; border-radius: 4px;")
+        self.shape_label = QLabel()
+        self.shape_label.setAlignment(Qt.AlignCenter)
+        shape_scroll_area.setWidget(self.shape_label)
+        shape_layout.addWidget(shape_scroll_area)
+
+        shape_btn_layout = QHBoxLayout()
+        self.btn_export_svg = QPushButton("Export SVG...")
+        self.btn_export_svg.clicked.connect(self.on_export_svg)
+        self.btn_export_svg.setEnabled(False)
+        shape_btn_layout.addStretch()
+        shape_btn_layout.addWidget(self.btn_export_svg)
+        shape_layout.addLayout(shape_btn_layout)
+
+        self.SHAPE_TAB_INDEX = self.tabs.addTab(self.shape_widget, "Shape")
+
         self.tabs.setTabEnabled(1, False)
         self.tabs.setTabEnabled(2, False)
         self.tabs.setTabEnabled(3, False)
+        self.tabs.setTabEnabled(self.SHAPE_TAB_INDEX, False)
+        self._current_shape_tag = None
 
         # Log Console at the bottom
         self.console = QPlainTextEdit()
@@ -510,6 +537,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabEnabled(1, False)  # Disable ABC explorer by default
         self.tabs.setTabEnabled(2, False)  # Disable Image view by default
         self.tabs.setTabEnabled(3, False)  # Disable ActionScript editor by default
+        self.tabs.setTabEnabled(self.SHAPE_TAB_INDEX, False)  # Disable Shape view by default
         self.abc_explorer.clear()
         self.btn_apply_code.setEnabled(False)
         self.btn_reset_code.setEnabled(False)
@@ -517,6 +545,8 @@ class MainWindow(QMainWindow):
         self.replace_image_action.setEnabled(False)
         self.btn_export_img.setEnabled(False)
         self.btn_replace_img.setEnabled(False)
+        self.btn_export_svg.setEnabled(False)
+        self._current_shape_tag = None
         
         if item_type == "header":
             self.tabs.setCurrentIndex(0)
@@ -537,6 +567,13 @@ class MainWindow(QMainWindow):
                 self.btn_replace_img.setEnabled(True)
                 self.tabs.setCurrentIndex(2)
                 
+            # Check if vector shape tag
+            elif tag.tag_type in SHAPE_TAG_TYPES:
+                self.tabs.setTabEnabled(self.SHAPE_TAB_INDEX, True)
+                self.show_shape_preview(tag)
+                self.btn_export_svg.setEnabled(True)
+                self.tabs.setCurrentIndex(self.SHAPE_TAB_INDEX)
+
             # Check if simple AVM1 tag
             elif tag.tag_type in (12, 59):  # DoAction (12), DoInitAction (59)
                 self.tabs.setTabEnabled(3, True)
@@ -686,6 +723,56 @@ class MainWindow(QMainWindow):
                 self.image_label.setText("No preview available (unsupported image type/format)")
         except Exception as e:
             self.image_label.setText(f"Error loading image preview: {str(e)}")
+
+    def show_shape_preview(self, tag):
+        self._current_shape_tag = tag
+        try:
+            svg_str = shape_to_svg(tag, background="#ffffff")
+            renderer = QSvgRenderer(bytearray(svg_str, "utf-8"))
+            if not renderer.isValid():
+                self.shape_label.setText("No se pudo renderizar el shape (SVG inválido).")
+                self.shape_label.setPixmap(QPixmap())
+                return
+
+            size = renderer.defaultSize()
+            w = max(1, min(800, size.width()))
+            h = max(1, min(600, size.height()))
+            # Mantener aspecto, escalar si es muy chico o muy grande
+            scale = min(600 / max(1, size.width()), 450 / max(1, size.height()))
+            scale = max(scale, 1.0) if max(size.width(), size.height()) < 100 else min(scale, 1.0)
+            target_w = max(1, int(size.width() * scale))
+            target_h = max(1, int(size.height() * scale))
+
+            image = QImage(target_w, target_h, QImage.Format_ARGB32)
+            image.fill(Qt.white)
+            painter = QPainter(image)
+            renderer.render(painter)
+            painter.end()
+
+            self.shape_label.setPixmap(QPixmap.fromImage(image))
+            self.shape_label.setText("")
+            self.log(f"Shape preview rendered for tag Type {tag.tag_type} ({target_w}x{target_h}px)")
+        except Exception as e:
+            self.shape_label.setText(f"Error rendering shape: {str(e)}")
+            self.log(f"Shape preview error: {e}")
+
+    def on_export_svg(self):
+        tag = self._current_shape_tag
+        if not tag:
+            return
+        try:
+            svg_str = shape_to_svg(tag)
+            filepath, _ = QFileDialog.getSaveFileName(
+                self, "Export Shape as SVG", "shape.svg", "SVG Files (*.svg)"
+            )
+            if not filepath:
+                return
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(svg_str)
+            self.log(f"Shape exported to {filepath}")
+        except Exception as e:
+            QMessageBox.warning(self, "Export SVG Failed", str(e))
+            self.log(f"Export SVG error: {e}")
 
     def on_export_image(self):
         selected = self.tree.selectedItems()

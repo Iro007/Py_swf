@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from py_swf.swf_parser import SWFFile, SWFTag, make_rect, parse_rect, BitStream
 from py_swf.avm1 import assemble_avm1, disassemble_avm1
 from py_swf.avm2 import ConstantPool, MethodInfo, MethodBodyInfo, ABCFile, assemble_instructions, disassemble_instructions
+from py_swf.shapes import parse_shape_tag, shape_to_svg
 
 def test_rect():
     print("Testing RECT bit packing/unpacking...")
@@ -214,6 +215,91 @@ def test_escaped_strings_compilation():
     
     print("String compilation tests passed!")
 
+def _build_triangle_shape_tag(tag_type=2):
+    """Construye un DefineShape con un triangulo solido rojo, para test de parseo."""
+    buf = bytearray()
+    bitpos = [0]
+
+    def write_bits(val, n):
+        for i in range(n):
+            bit = (val >> (n - 1 - i)) & 1
+            byte_idx = bitpos[0] // 8
+            if byte_idx >= len(buf):
+                buf.append(0)
+            shift = 7 - (bitpos[0] % 8)
+            buf[byte_idx] |= (bit << shift)
+            bitpos[0] += 1
+
+    def align():
+        if bitpos[0] % 8 != 0:
+            bitpos[0] += 8 - (bitpos[0] % 8)
+
+    def signed(val, nbits):
+        return val & ((1 << nbits) - 1)
+
+    # ShapeBounds RECT: 0,0 to 2000,2000 twips (100x100 px)
+    write_bits(16, 5)
+    write_bits(0, 16); write_bits(2000, 16); write_bits(0, 16); write_bits(2000, 16)
+    align()
+
+    # FillStyleArray: 1 solid red style
+    write_bits(1, 8)
+    write_bits(0x00, 8)
+    write_bits(255, 8); write_bits(0, 8); write_bits(0, 8)
+
+    # LineStyleArray: none
+    write_bits(0, 8)
+
+    # numFillBits=1, numLineBits=0
+    write_bits(1, 4)
+    write_bits(0, 4)
+
+    # StyleChangeRecord: moveto (0,0), fillStyle1=1
+    write_bits(0, 1)
+    write_bits(0b00101, 5)
+    write_bits(11, 5); write_bits(0, 11); write_bits(0, 11)
+    write_bits(1, 1)
+
+    # Three straight edges forming a right triangle
+    NB = 13
+    for dx, dy in [(2000, 0), (-2000, 2000), (0, -2000)]:
+        write_bits(1, 1); write_bits(1, 1)
+        write_bits(NB - 2, 4)
+        write_bits(1, 1)
+        write_bits(signed(dx, NB), NB)
+        write_bits(signed(dy, NB), NB)
+
+    # EndShapeRecord
+    write_bits(0, 1); write_bits(0, 5)
+    align()
+
+    tag_data = (1).to_bytes(2, "little") + bytes(buf)
+    return SWFTag(tag_type, tag_data)
+
+
+def test_shape_parse_and_svg():
+    print("Testing DefineShape parsing and SVG export...")
+    tag = _build_triangle_shape_tag()
+    parsed = parse_shape_tag(tag)
+
+    assert parsed["shape_id"] == 1, "Shape ID mismatch"
+    assert parsed["bounds"] == {"xmin": 0, "xmax": 2000, "ymin": 0, "ymax": 2000}, "Bounds mismatch"
+    assert len(parsed["fill_styles"]) == 1, "Expected 1 fill style"
+    assert parsed["fill_styles"][0]["color"] == {"r": 255, "g": 0, "b": 0, "a": 255}, "Fill color mismatch"
+
+    assert len(parsed["groups"]) == 1, "Expected 1 style group"
+    subpaths = parsed["groups"][0]["subpaths"]
+    assert len(subpaths) == 1, "Expected 1 subpath (closed triangle)"
+    points = [(seg["x"], seg["y"]) for seg in subpaths[0]]
+    assert points == [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0), (0.0, 0.0)], f"Unexpected triangle points: {points}"
+
+    svg = shape_to_svg(tag)
+    assert "<svg" in svg and "</svg>" in svg, "SVG output malformed"
+    assert "rgba(255,0,0,1.000)" in svg, "Expected red fill not found in SVG output"
+    assert "M 0.00 0.00" in svg, "Expected moveto command not found in SVG path"
+    print("DefineShape parse/SVG test passed!")
+
+
 if __name__ == "__main__":
     test_rect()
     print("-" * 40)
@@ -226,5 +312,7 @@ if __name__ == "__main__":
     test_doabc_edit_and_save()
     print("-" * 40)
     test_escaped_strings_compilation()
+    print("-" * 40)
+    test_shape_parse_and_svg()
     print("=" * 40)
     print("All unit tests passed successfully!")
