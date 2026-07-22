@@ -35,6 +35,7 @@ TAG_NAMES = {
     36: "DefineBitsLossless2",
     37: "DefineEditText",
     39: "DefineSprite",
+    41: "ProductInfo",
     43: "FrameLabel",
     45: "SoundStreamHead2",
     46: "DefineMorphShape",
@@ -46,14 +47,14 @@ TAG_NAMES = {
     60: "DefineVideoStream",
     61: "VideoFrame",
     62: "DefineFontInfo2",
+    63: "DebugID",
     64: "EnableDebugger2",
     65: "ScriptLimits",
     66: "SetTabIndex",
     69: "FileAttributes",
     70: "PlaceObject3",
     71: "ImportAssets2",
-    73: "DefineFontAlignZones",
-    72: "FileAttributes",
+    72: "DoABC1",
     73: "DefineFontAlignZones",
     74: "CSMTextSettings",
     75: "DefineFont3",
@@ -69,6 +70,36 @@ TAG_NAMES = {
     89: "StartSound2",
     90: "DefineBitsJPEG4",
     91: "DefineFont4",
+}
+
+def collect_symbol_names(tags):
+    """
+    Mapea character id -> nombre a partir de SymbolClass (76) y ExportAssets (56).
+    Ambos comparten formato: UI16 count, luego (UI16 char_id, STRING nombre).
+    """
+    names = {}
+    for tag in tags:
+        if tag.tag_type not in (56, 76) or len(tag.data) < 2:
+            continue
+        count = int.from_bytes(tag.data[0:2], "little")
+        pos = 2
+        for _ in range(count):
+            if pos + 2 > len(tag.data):
+                break
+            char_id = int.from_bytes(tag.data[pos : pos + 2], "little")
+            pos += 2
+            end = tag.data.find(b"\x00", pos)
+            if end == -1:
+                break
+            name = tag.data[pos:end].decode("utf-8", errors="replace")
+            pos = end + 1
+            names.setdefault(char_id, name)
+    return names
+
+# Definition tags whose payload starts with a UI16 character id
+CHARACTER_TAGS = {
+    2, 6, 7, 10, 11, 13, 14, 20, 21, 22, 32, 33, 34, 35, 36, 37, 39,
+    46, 48, 60, 75, 83, 84, 87, 90, 91,
 }
 
 class BitStream:
@@ -110,6 +141,16 @@ class BitStream:
         if self.bit_offset > 0:
             self.bit_offset = 0
             self.byte_offset += 1
+
+    def read_u16_le(self):
+        """Byte-aligned little-endian UI16 (SWF multi-byte ints are LE)."""
+        lo = self.read_bits(8)
+        hi = self.read_bits(8)
+        return lo | (hi << 8)
+
+    def read_s16_le(self):
+        val = self.read_u16_le()
+        return val - 0x10000 if val & 0x8000 else val
 
 def parse_rect(stream):
     nbits = stream.read_bits(5)
@@ -157,10 +198,11 @@ def make_rect(xmin, xmax, ymin, ymax):
     return bytes(data)
 
 class SWFTag:
-    def __init__(self, tag_type, data):
+    def __init__(self, tag_type, data, parse_error=None):
         self.tag_type = tag_type
         self.data = data
-        
+        self.parse_error = parse_error
+
     @property
     def name(self):
         return TAG_NAMES.get(self.tag_type, f"Unknown_{self.tag_type}")
@@ -168,6 +210,12 @@ class SWFTag:
     @property
     def is_doabc(self):
         return self.tag_type == 82
+
+    @property
+    def char_id(self):
+        if self.tag_type in CHARACTER_TAGS and len(self.data) >= 2:
+            return int.from_bytes(self.data[0:2], "little")
+        return None
         
     def parse_doabc(self):
         if not self.is_doabc or len(self.data) < 4:
@@ -208,45 +256,37 @@ class SWFFile:
 
     def read_file(self, filepath):
         with open(filepath, "rb") as f:
-            header_bytes = f.read(8)
-            if len(header_bytes) < 8:
-                raise ValueError("Invalid SWF file: header too short")
-                
-            self.signature = header_bytes[0:3].decode("ascii", errors="ignore")
-            if self.signature not in ("FWS", "CWS", "ZWS"):
-                raise ValueError(f"Unknown SWF signature: {self.signature}")
-                
-            self.version = header_bytes[3]
-            decompressed_length = int.from_bytes(header_bytes[4:8], "little")
-            
-            # Read rest of file
-            rest_data = f.read()
-            
-            if self.signature == "CWS":
-                decompressed_data = zlib.decompress(rest_data)
-            elif self.signature == "ZWS":
-                # LZMA compressed:
-                # 4 bytes signature + 1 byte version + 4 bytes decompressed length
-                # followed by 4 bytes compressed length, then 5 bytes lzma properties, then lzma data
-                # Python's lzma module expects properties at the start of stream or formatted as XZ
-                # The format in SWF is LZMA ALONE (with properties first but compressed length omitted)
-                # Actually, in ZWS, the compressed length is stored as 4 bytes (UI32) at the start of compression stream,
-                # then 5 bytes of LZMA properties (dicsize, etc.), then the LZMA raw stream.
-                compressed_len = int.from_bytes(rest_data[0:4], "little")
-                lzma_properties = rest_data[4:9]
-                lzma_data = rest_data[9:]
-                # Reconstruct standard LZMA header: properties + 8 bytes uncompressed size + payload
-                uncompressed_size_bytes = decompressed_length.to_bytes(8, "little")
-                lzma_stream = lzma_properties + uncompressed_size_bytes + lzma_data
-                decompressed_data = lzma.decompress(lzma_stream)
-            else:
-                decompressed_data = rest_data
-                
-            # Verify decompressed length (header length includes 8 bytes header)
-            # The decompressed data length should match decompressed_length - 8
-            # (though sometimes minor size mismatches occur in wild, we won't throw)
-            
-            self._parse_decompressed(decompressed_data)
+            self.read_bytes(f.read())
+
+    def read_bytes(self, file_bytes):
+        header_bytes = file_bytes[:8]
+        if len(header_bytes) < 8:
+            raise ValueError("Invalid SWF file: header too short")
+
+        self.signature = header_bytes[0:3].decode("ascii", errors="ignore")
+        if self.signature not in ("FWS", "CWS", "ZWS"):
+            raise ValueError(f"Unknown SWF signature: {self.signature}")
+
+        self.version = header_bytes[3]
+        decompressed_length = int.from_bytes(header_bytes[4:8], "little")
+
+        rest_data = file_bytes[8:]
+
+        if self.signature == "CWS":
+            # decompressobj tolerates trailing garbage after the zlib stream
+            decompressed_data = zlib.decompressobj().decompress(rest_data)
+        elif self.signature == "ZWS":
+            # LZMA: 4 bytes compressed length, 5 bytes LZMA properties, raw stream.
+            # Reconstruct a standard ALONE header (properties + u64 size) for lzma.
+            lzma_properties = rest_data[4:9]
+            lzma_data = rest_data[9:]
+            uncompressed_size_bytes = decompressed_length.to_bytes(8, "little")
+            lzma_stream = lzma_properties + uncompressed_size_bytes + lzma_data
+            decompressed_data = lzma.decompress(lzma_stream)
+        else:
+            decompressed_data = rest_data
+
+        self._parse_decompressed(decompressed_data)
 
     def _parse_decompressed(self, data):
         stream = BitStream(data)
@@ -284,15 +324,22 @@ class SWFFile:
                 
             offset += length_bytes
             tag_data = data[offset : offset + tag_len]
+            parse_error = None
+            if len(tag_data) < tag_len:
+                parse_error = f"truncated tag: expected {tag_len} bytes, got {len(tag_data)}"
             offset += tag_len
-            
-            tag = SWFTag(tag_type, tag_data)
+
+            tag = SWFTag(tag_type, tag_data, parse_error=parse_error)
             self.tags.append(tag)
-            
+
             if tag_type == 0:  # End Tag
                 break
 
     def save_file(self, filepath):
+        with open(filepath, "wb") as f:
+            f.write(self.save_bytes())
+
+    def save_bytes(self):
         # 1. Rebuild decompressed body
         body = bytearray()
         rect_bytes = make_rect(self.rect["xmin"], self.rect["xmax"], self.rect["ymin"], self.rect["ymax"])
@@ -341,7 +388,5 @@ class SWFFile:
             compressed_body.extend(payload)
         else:
             compressed_body = body
-            
-        with open(filepath, "wb") as f:
-            f.write(header)
-            f.write(compressed_body)
+
+        return bytes(header) + bytes(compressed_body)

@@ -21,4 +21,18 @@ jobs:
         pip install -r requirements.txt
     - name: Run tests
       run: |
-        python tests/test_swf.py
+        python -m pytest tests -q
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Install and typecheck
+      working-directory: web
+      run: |
+        npm ci
+        npm run lint
+        npm run build

@@ -70,19 +70,18 @@ def _read_matrix(stream):
 
 
 def _read_gradient(stream, with_alpha, focal=False):
-    stream.read_bits(2)  # spread mode
-    stream.read_bits(2)  # interpolation mode
+    spread = stream.read_bits(2)
+    interpolation = stream.read_bits(2)
     num_gradients = stream.read_bits(4)
     stops = []
     for _ in range(num_gradients):
         ratio = stream.read_bits(8)
         color = _read_color(stream, with_alpha)
         stops.append({"ratio": ratio, "color": color})
+    result = {"stops": stops, "spread": spread, "interpolation": interpolation}
     if focal:
-        stream.data  # noop, keep symmetry
-        focal_point = stream.read_signed_bits(16) / 256.0
-        return {"stops": stops, "focalPoint": focal_point}
-    return {"stops": stops}
+        result["focalPoint"] = stream.read_s16_le() / 256.0  # FIXED8 little-endian
+    return result
 
 
 def _read_fill_style(stream, with_alpha):
@@ -95,7 +94,7 @@ def _read_fill_style(stream, with_alpha):
         style["gradient"] = _read_gradient(stream, with_alpha, focal=(fill_type == FILL_FOCAL_RADIAL_GRADIENT))
     elif fill_type in (FILL_REPEATING_BITMAP, FILL_CLIPPED_BITMAP,
                        FILL_NON_SMOOTHED_REPEATING_BITMAP, FILL_NON_SMOOTHED_CLIPPED_BITMAP):
-        style["bitmapId"] = stream.read_bits(16)
+        style["bitmapId"] = stream.read_u16_le()
         style["matrix"] = _read_matrix(stream)
     return style
 
@@ -104,7 +103,7 @@ def _read_style_count(stream):
     """Style arrays use UI8 count, or 0xFF + UI16 for >254 styles (spec 6.3.2)."""
     count = stream.read_bits(8)
     if count == 0xFF:
-        count = stream.read_bits(16)
+        count = stream.read_u16_le()
     return count
 
 
@@ -118,7 +117,7 @@ def _read_line_style_array(stream, with_alpha, use_line_style2):
     styles = []
     for _ in range(count):
         if use_line_style2:
-            width = stream.read_bits(16)
+            width = stream.read_u16_le()
             start_cap = stream.read_bits(2)
             join_style = stream.read_bits(2)
             has_fill = stream.read_bits(1)
@@ -129,7 +128,7 @@ def _read_line_style_array(stream, with_alpha, use_line_style2):
             no_close = stream.read_bits(1)
             end_cap = stream.read_bits(2)
             if join_style == 2:  # miter join
-                stream.read_bits(16)  # miter limit factor (fixed8)
+                stream.read_u16_le()  # miter limit factor (fixed8)
             entry = {"width": width, "startCap": start_cap, "joinStyle": join_style,
                      "noHScale": bool(no_hscale), "noVScale": bool(no_vscale),
                      "pixelHinting": bool(pixel_hinting), "noClose": bool(no_close),
@@ -140,7 +139,7 @@ def _read_line_style_array(stream, with_alpha, use_line_style2):
                 entry["color"] = _read_color(stream, True)
             styles.append(entry)
         else:
-            width = stream.read_bits(16)
+            width = stream.read_u16_le()
             color = _read_color(stream, with_alpha)
             styles.append({"width": width, "color": color})
     return styles
@@ -197,6 +196,10 @@ def parse_shape_tag(tag):
     cur_group = {"fill_style0": 0, "fill_style1": 0, "line_style": 0, "subpaths": []}
     cur_subpath = []
     cur_x, cur_y = 0, 0
+    # Tras un new-styles record los índices refieren al array nuevo; acumulamos
+    # todos los estilos y desplazamos los índices con estos offsets.
+    fill_base = 0
+    line_base = 0
 
     def flush_subpath():
         if cur_subpath:
@@ -229,19 +232,25 @@ def parse_shape_tag(tag):
                 cur_subpath.append({"cmd": "move", "x": cur_x / 20.0, "y": cur_y / 20.0})
 
             if state_fill_style0:
-                cur_group["fill_style0"] = stream.read_bits(num_fill_bits)
+                idx = stream.read_bits(num_fill_bits)
+                cur_group["fill_style0"] = idx + fill_base if idx else 0
             if state_fill_style1:
-                cur_group["fill_style1"] = stream.read_bits(num_fill_bits)
+                idx = stream.read_bits(num_fill_bits)
+                cur_group["fill_style1"] = idx + fill_base if idx else 0
             if state_line_style:
-                cur_group["line_style"] = stream.read_bits(num_line_bits)
+                idx = stream.read_bits(num_line_bits)
+                cur_group["line_style"] = idx + line_base if idx else 0
 
             if state_new_styles:
                 flush_subpath()
                 if cur_group["subpaths"]:
                     groups.append(cur_group)
                 cur_subpath = []
-                fill_styles = _read_fill_style_array(stream, with_alpha)
-                line_styles = _read_line_style_array(stream, with_alpha, use_line_style2)
+                stream.align()  # los arrays de estilos empiezan alineados a byte
+                fill_base = len(fill_styles)
+                line_base = len(line_styles)
+                fill_styles = fill_styles + _read_fill_style_array(stream, with_alpha)
+                line_styles = line_styles + _read_line_style_array(stream, with_alpha, use_line_style2)
                 num_fill_bits = stream.read_bits(4)
                 num_line_bits = stream.read_bits(4)
                 cur_group = {"fill_style0": 0, "fill_style1": 0, "line_style": 0, "subpaths": []}
@@ -303,6 +312,72 @@ def _color_to_css(color, default="#000000"):
     return f"rgba({color['r']},{color['g']},{color['b']},{a:.3f})"
 
 
+# El "gradient square" SWF va de -16384 a 16384 twips en espacio de gradiente;
+# la MATRIX del estilo lo lleva a twips de la shape. Nuestros paths están en px
+# (twips/20), así que componemos scale(1/20) con la matriz.
+_GRADIENT_HALF = 16384
+
+_SPREAD_METHODS = {0: "pad", 1: "reflect", 2: "repeat"}
+
+
+def _matrix_to_svg(m, divisor=20.0):
+    return (
+        f"matrix({m['scaleX'] / divisor:.6f} {m['rotateSkew0'] / divisor:.6f} "
+        f"{m['rotateSkew1'] / divisor:.6f} {m['scaleY'] / divisor:.6f} "
+        f"{m['translateX'] / divisor:.3f} {m['translateY'] / divisor:.3f})"
+    )
+
+
+def _gradient_def(style, def_id):
+    grad = style["gradient"]
+    spread = _SPREAD_METHODS.get(grad.get("spread", 0), "pad")
+    transform = _matrix_to_svg(style["matrix"])
+    stops = "".join(
+        f"<stop offset='{s['ratio'] / 255.0:.4f}' stop-color='rgb({s['color']['r']},{s['color']['g']},{s['color']['b']})' "
+        f"stop-opacity='{s['color'].get('a', 255) / 255.0:.3f}'/>"
+        for s in grad["stops"]
+    )
+    common = f"gradientUnits='userSpaceOnUse' spreadMethod='{spread}' gradientTransform='{transform}'"
+    if style["type"] == FILL_LINEAR_GRADIENT:
+        return (
+            f"<linearGradient id='{def_id}' x1='{-_GRADIENT_HALF}' y1='0' "
+            f"x2='{_GRADIENT_HALF}' y2='0' {common}>{stops}</linearGradient>"
+        )
+    fx_attr = ""
+    if style["type"] == FILL_FOCAL_RADIAL_GRADIENT:
+        fx = grad.get("focalPoint", 0.0) * _GRADIENT_HALF
+        fx_attr = f"fx='{fx:.1f}' fy='0' "
+    return (
+        f"<radialGradient id='{def_id}' cx='0' cy='0' r='{_GRADIENT_HALF}' "
+        f"{fx_attr}{common}>{stops}</radialGradient>"
+    )
+
+
+def _bitmap_pattern_def(style, def_id, bitmap_resolver):
+    """Bitmap fill como <pattern>. `bitmap_resolver(char_id)` debe devolver
+    (png_bytes, width, height) o None. El patrón siempre repite (la variante
+    'clipped' se aproxima)."""
+    if bitmap_resolver is None:
+        return None
+    resolved = bitmap_resolver(style.get("bitmapId"))
+    if not resolved:
+        return None
+    png_bytes, width, height = resolved
+    import base64
+
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    transform = _matrix_to_svg(style["matrix"])
+    return (
+        f"<pattern id='{def_id}' patternUnits='userSpaceOnUse' width='{width}' height='{height}' "
+        f"patternTransform='{transform}'>"
+        f"<image href='data:image/png;base64,{b64}' width='{width}' height='{height}'/></pattern>"
+    )
+
+
+_LINE_CAPS = {0: "round", 1: "butt", 2: "square"}
+_LINE_JOINS = {0: "round", 1: "bevel", 2: "miter"}
+
+
 def _subpath_to_svg_d(subpath):
     parts = []
     for seg in subpath:
@@ -315,16 +390,84 @@ def _subpath_to_svg_d(subpath):
     return " ".join(parts)
 
 
-def shape_to_svg(tag, background=None):
+def shape_to_svg_fragment(tag, id_prefix="s", bitmap_resolver=None):
+    """
+    Renderiza un DefineShape/2/3/4 como (defs, body, bounds) para componer en
+    un documento SVG mayor. Gradientes y bitmaps se emiten como defs reales.
+    """
+    parsed = parse_shape_tag(tag)
+    bounds = parsed["bounds"]
+    if not bounds:
+        return "", "", None
+
+    fill_styles = parsed["fill_styles"]
+    line_styles = parsed["line_styles"]
+
+    defs = []
+    fill_css_cache = {}
+
+    def fill_css_for(fill_idx):
+        if not fill_idx or not (1 <= fill_idx <= len(fill_styles)):
+            return "none"
+        if fill_idx in fill_css_cache:
+            return fill_css_cache[fill_idx]
+        style = fill_styles[fill_idx - 1]
+        css = "#999999"
+        if style["type"] == FILL_SOLID:
+            css = _color_to_css(style.get("color"))
+        elif style["type"] in (FILL_LINEAR_GRADIENT, FILL_RADIAL_GRADIENT, FILL_FOCAL_RADIAL_GRADIENT):
+            def_id = f"{id_prefix}_g{fill_idx}_{len(defs)}"
+            defs.append(_gradient_def(style, def_id))
+            css = f"url(#{def_id})"
+        elif style["type"] in (FILL_REPEATING_BITMAP, FILL_CLIPPED_BITMAP,
+                               FILL_NON_SMOOTHED_REPEATING_BITMAP, FILL_NON_SMOOTHED_CLIPPED_BITMAP):
+            def_id = f"{id_prefix}_b{fill_idx}_{len(defs)}"
+            pattern = _bitmap_pattern_def(style, def_id, bitmap_resolver)
+            if pattern:
+                defs.append(pattern)
+                css = f"url(#{def_id})"
+        fill_css_cache[fill_idx] = css
+        return css
+
+    body = []
+    for group in parsed["groups"]:
+        d = " ".join(_subpath_to_svg_d(sp) for sp in group["subpaths"] if sp)
+        if not d:
+            continue
+
+        fill_css = fill_css_for(group["fill_style1"] or group["fill_style0"])
+
+        stroke_attrs = "stroke='none'"
+        line_idx = group["line_style"]
+        if line_idx and 1 <= line_idx <= len(line_styles):
+            lstyle = line_styles[line_idx - 1]
+            color = lstyle.get("color")
+            if color is None and "fillStyle" in lstyle:
+                color = lstyle["fillStyle"].get("color")
+            stroke_css = _color_to_css(color)
+            stroke_width = max(0.05, lstyle.get("width", 20) / 20.0)
+            cap = _LINE_CAPS.get(lstyle.get("startCap", 0), "round")
+            join = _LINE_JOINS.get(lstyle.get("joinStyle", 0), "round")
+            stroke_attrs = (
+                f"stroke='{stroke_css}' stroke-width='{stroke_width:.2f}' "
+                f"stroke-linecap='{cap}' stroke-linejoin='{join}'"
+            )
+
+        body.append(f"<path d='{d}' fill='{fill_css}' fill-rule='evenodd' {stroke_attrs}/>")
+
+    return "".join(defs), "".join(body), bounds
+
+
+def shape_to_svg(tag, background=None, bitmap_resolver=None):
     """
     Renderiza un tag DefineShape/2/3/4 como documento SVG (string).
     Cada "group" se dibuja como <path> propio; el relleno usado es fill_style1
     (convención estándar: el lado derecho del edge es el interior de la región),
     con fallback a fill_style0 si fill1 es 0 (sin estilo).
+    `bitmap_resolver(char_id) -> (png_bytes, w, h) | None` habilita bitmap fills.
     """
-    parsed = parse_shape_tag(tag)
-    bounds = parsed["bounds"]
-    if not bounds:
+    defs, body, bounds = shape_to_svg_fragment(tag, bitmap_resolver=bitmap_resolver)
+    if bounds is None:
         return "<svg xmlns='http://www.w3.org/2000/svg'></svg>"
 
     width = max(1, round((bounds["xmax"] - bounds["xmin"]) / 20.0))
@@ -332,46 +475,14 @@ def shape_to_svg(tag, background=None):
     ox = bounds["xmin"] / 20.0
     oy = bounds["ymin"] / 20.0
 
-    fill_styles = parsed["fill_styles"]
-    line_styles = parsed["line_styles"]
-
     svg_parts = [
         f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='{ox:.2f} {oy:.2f} {width} {height}' "
         f"width='{width}' height='{height}'>"
     ]
     if background:
         svg_parts.append(f"<rect x='{ox:.2f}' y='{oy:.2f}' width='{width}' height='{height}' fill='{background}'/>")
-
-    for group in parsed["groups"]:
-        d = " ".join(_subpath_to_svg_d(sp) for sp in group["subpaths"] if sp)
-        if not d:
-            continue
-
-        fill_idx = group["fill_style1"] or group["fill_style0"]
-        fill_css = "none"
-        if fill_idx and 1 <= fill_idx <= len(fill_styles):
-            style = fill_styles[fill_idx - 1]
-            if style["type"] == FILL_SOLID:
-                fill_css = _color_to_css(style.get("color"))
-            else:
-                # Gradientes/bitmaps: usamos el primer stop o gris como aproximación visual.
-                if "gradient" in style and style["gradient"]["stops"]:
-                    fill_css = _color_to_css(style["gradient"]["stops"][0]["color"])
-                else:
-                    fill_css = "#999999"
-
-        stroke_css = "none"
-        stroke_width = 0
-        line_idx = group["line_style"]
-        if line_idx and 1 <= line_idx <= len(line_styles):
-            lstyle = line_styles[line_idx - 1]
-            stroke_css = _color_to_css(lstyle.get("color"))
-            stroke_width = max(0.05, lstyle.get("width", 20) / 20.0)
-
-        svg_parts.append(
-            f"<path d='{d}' fill='{fill_css}' fill-rule='evenodd' "
-            f"stroke='{stroke_css}' stroke-width='{stroke_width:.2f}'/>"
-        )
-
+    if defs:
+        svg_parts.append(f"<defs>{defs}</defs>")
+    svg_parts.append(body)
     svg_parts.append("</svg>")
     return "".join(svg_parts)

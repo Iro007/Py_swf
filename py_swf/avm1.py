@@ -44,29 +44,44 @@ AVM1_OPCODES = {
     0x35: "mb_string_extract",
     0x36: "mb_char_to_ascii",
     0x37: "mb_ascii_to_char",
-    0x3A: "delete_var",
-    0x3B: "delete_obj",
+    0x3A: "delete",
+    0x3B: "delete2",
     0x3C: "define_local",
-    0x3D: "define_local2",
-    0x3E: "end_drag",
-    0x3F: "call_method",
-    0x40: "new_method",
-    0x41: "instance_of",
-    0x42: "type_of",
-    0x43: "target_path",
-    0x44: "enumerate",
-    0x45: "new_object",
-    0x46: "enumerate2",
-    0x47: "bit_and",
-    0x48: "bit_or",
-    0x49: "bit_xor",
-    0x4A: "bit_lshift",
-    0x4B: "bit_rshift",
-    0x4C: "bit_urshift",
-    0x4D: "strict_equals",
-    0x4E: "greater_than",
-    0x50: "string_greater_than",
-    0x52: "extends_op",
+    0x3D: "call_function",
+    0x3E: "return",
+    0x3F: "modulo",
+    0x40: "new_object",
+    0x41: "define_local2",
+    0x42: "init_array",
+    0x43: "init_object",
+    0x44: "type_of",
+    0x45: "target_path",
+    0x46: "enumerate",
+    0x47: "add2",
+    0x48: "less2",
+    0x49: "equals2",
+    0x4A: "to_number",
+    0x4B: "to_string",
+    0x4C: "push_duplicate",
+    0x4D: "stack_swap",
+    0x4E: "get_member",
+    0x4F: "set_member",
+    0x50: "increment",
+    0x51: "decrement",
+    0x52: "call_method",
+    0x53: "new_method",
+    0x54: "instance_of",
+    0x55: "enumerate2",
+    0x60: "bit_and",
+    0x61: "bit_or",
+    0x62: "bit_xor",
+    0x63: "bit_lshift",
+    0x64: "bit_rshift",
+    0x65: "bit_urshift",
+    0x66: "strict_equals",
+    0x67: "greater",
+    0x68: "string_greater",
+    0x69: "extends",
     # Multi-byte actions
     0x81: "goto_frame",
     0x83: "get_url",
@@ -77,14 +92,58 @@ AVM1_OPCODES = {
     0x8B: "set_target",
     0x8C: "goto_label",
     0x8D: "wait_for_frame2",
+    0x8E: "define_function2",
+    0x94: "with",
     0x96: "push",
     0x99: "jump",
     0x9A: "get_url2",
+    0x9B: "define_function",
     0x9D: "if",
     0x9F: "goto_frame2",
 }
 
+# Actions whose record ends with a u16 code size; that many bytes of inline
+# action code follow the record in the stream. Represented in disasm with an
+# end-of-block label so the size is recomputed on assembly.
+BLOCK_ACTIONS = (0x8E, 0x94, 0x9B)
+
 AVM1_MNEMONICS = {v: k for k, v in AVM1_OPCODES.items()}
+
+# A mnemonic collision would make the assembler emit the wrong action code.
+assert len(AVM1_MNEMONICS) == len(AVM1_OPCODES), "duplicate mnemonic in AVM1_OPCODES"
+
+def _read_cstring(data, offset):
+    end = data.find(b"\x00", offset)
+    if end == -1:
+        return data[offset:].decode("utf-8", errors="ignore"), len(data)
+    return data[offset:end].decode("utf-8", errors="ignore"), end + 1
+
+def _block_end_pc(pc, act_data):
+    """PC just past the inline code block following a BLOCK_ACTIONS record
+    (the block length is the last u16 of the record payload)."""
+    if len(act_data) < 2:
+        return None
+    code_size = int.from_bytes(act_data[-2:], "little")
+    return pc + 3 + len(act_data) + code_size
+
+def _parse_bracket_list(text):
+    """Split a '["a", "b"]'-style comma list, respecting quotes."""
+    stripped = text.strip().strip("[]")
+    items = []
+    in_quotes = False
+    curr = []
+    for char in stripped:
+        if char == '"':
+            in_quotes = not in_quotes
+            curr.append(char)
+        elif char == ',' and not in_quotes:
+            items.append("".join(curr).strip())
+            curr = []
+        else:
+            curr.append(char)
+    if curr:
+        items.append("".join(curr).strip())
+    return [i for i in items if i]
 
 def parse_push_values(data):
     values = []
@@ -173,6 +232,10 @@ def disassemble_avm1(data):
                 offset = int.from_bytes(act_data[0:2], "little", signed=True)
                 target_pc = pc + 5 + offset
                 target_pcs.add(target_pc)
+            elif code in BLOCK_ACTIONS:
+                end_pc = _block_end_pc(pc, act_data)
+                if end_pc is not None:
+                    target_pcs.add(end_pc)
                 
     # Pass 2: Format disasm text
     lines = []
@@ -233,6 +296,34 @@ def disassemble_avm1(data):
                 formatted.append(f'"{label}"')
             elif code == 0x8D:  # wait_for_frame2
                 formatted.append(str(act_data[0]))
+            elif code == 0x9B:  # define_function
+                name, off = _read_cstring(act_data, 0)
+                count = int.from_bytes(act_data[off:off+2], "little")
+                off += 2
+                params = []
+                for _ in range(count):
+                    p, off = _read_cstring(act_data, off)
+                    params.append(f'"{p}"')
+                end_pc = _block_end_pc(pc, act_data)
+                formatted.append(f'"{name}" [{", ".join(params)}] L_{end_pc}')
+            elif code == 0x8E:  # define_function2
+                name, off = _read_cstring(act_data, 0)
+                count = int.from_bytes(act_data[off:off+2], "little")
+                off += 2
+                reg_count = act_data[off]
+                off += 1
+                flags = int.from_bytes(act_data[off:off+2], "little")
+                off += 2
+                params = []
+                for _ in range(count):
+                    reg = act_data[off]
+                    off += 1
+                    p, off = _read_cstring(act_data, off)
+                    params.append(f'r:{reg} "{p}"')
+                end_pc = _block_end_pc(pc, act_data)
+                formatted.append(f'"{name}" {reg_count} {flags} [{", ".join(params)}] L_{end_pc}')
+            elif code == 0x94:  # with
+                formatted.append(f"L_{_block_end_pc(pc, act_data)}")
             elif code == 0x9A:  # get_url2
                 formatted.append(str(act_data[0]))
             elif code == 0x9F:  # goto_frame2
@@ -245,7 +336,15 @@ def disassemble_avm1(data):
                 
             args_str = " " + " ".join(formatted) if formatted else ""
             lines.append(f"    {mnemonic}{args_str}")
-            
+
+    # A block-end label may point just past the last action; emit it so
+    # the assembler can resolve it.
+    if actions:
+        last_pc, last_code, last_data = actions[-1]
+        stream_end = last_pc + (1 if last_code < 0x80 else 3 + len(last_data))
+        if stream_end in target_pcs:
+            lines.append(f"L_{stream_end}:")
+
     return "\n".join(lines)
 
 def serialize_push_value(val_str):
@@ -338,12 +437,15 @@ def assemble_avm1(text):
             "args": args
         })
         label_def = None
-        
+
+    # A label after the last instruction (block-end marker) must still resolve
+    trailing_label = label_def
+
     # Pass 1: Calculate PC values
     pc = 0
     inst_info_list = []
     label_pcs = {}
-    
+
     for inst in instructions:
         lbl = inst["label"]
         if lbl:
@@ -436,6 +538,27 @@ def assemble_avm1(text):
                 act_data.extend(label)
             elif code == 0x8D:  # wait_for_frame2
                 act_data.append(int(raw_args[0]))
+            elif code == 0x9B:  # define_function "name" [params] L_end
+                act_data.extend(raw_args[0].strip('"').encode("utf-8") + b"\x00")
+                params = _parse_bracket_list(" ".join(raw_args[1:-1]))
+                act_data.extend(len(params).to_bytes(2, "little"))
+                for p in params:
+                    act_data.extend(p.strip('"').encode("utf-8") + b"\x00")
+                act_data.extend([0, 0])  # code size placeholder
+            elif code == 0x8E:  # define_function2 "name" regs flags [r:N params] L_end
+                name = raw_args[0].strip('"').encode("utf-8") + b"\x00"
+                pairs = _parse_bracket_list(" ".join(raw_args[3:-1]))
+                act_data.extend(name)
+                act_data.extend(len(pairs).to_bytes(2, "little"))
+                act_data.append(int(raw_args[1]))
+                act_data.extend(int(raw_args[2]).to_bytes(2, "little"))
+                for pair in pairs:
+                    reg_str, pname = pair.split(None, 1)
+                    act_data.append(int(reg_str[2:]))
+                    act_data.extend(pname.strip().strip('"').encode("utf-8") + b"\x00")
+                act_data.extend([0, 0])  # code size placeholder
+            elif code == 0x94:  # with L_end
+                act_data.extend([0, 0])  # code size placeholder
             elif code == 0x9A:  # get_url2
                 act_data.append(int(raw_args[0]))
             elif code == 0x9F:  # goto_frame2
@@ -445,9 +568,18 @@ def assemble_avm1(text):
                 act_data.extend(bias.to_bytes(2, "little"))
                 
             size = 3 + len(act_data) # 1 code + 2 length + payload
-            inst_info_list.append({"pc": pc, "code": code, "size": size, "data": bytes(act_data), "label_target": raw_args[0] if code in (0x99, 0x9D) else None})
+            if code in (0x99, 0x9D):
+                label_target = raw_args[0]
+            elif code in BLOCK_ACTIONS:
+                label_target = raw_args[-1]
+            else:
+                label_target = None
+            inst_info_list.append({"pc": pc, "code": code, "size": size, "data": bytes(act_data), "label_target": label_target})
             pc += size
-            
+
+    if trailing_label:
+        label_pcs[trailing_label] = pc
+
     # Pass 2: Write bytes, resolving jumps
     out = bytearray()
     for inst in inst_info_list:
@@ -465,7 +597,15 @@ def assemble_avm1(text):
                 # Offset is target_pc - (pc + 5)
                 relative_offset = target_pc - (pc + 5)
                 data = relative_offset.to_bytes(2, "little", signed=True)
-                
+            elif code in BLOCK_ACTIONS:
+                target_label = inst["label_target"]
+                if target_label not in label_pcs:
+                    raise ValueError(f"Label '{target_label}' not defined")
+                code_size = label_pcs[target_label] - (pc + inst["size"])
+                if code_size < 0:
+                    raise ValueError(f"Block end label '{target_label}' precedes the block")
+                data = data[:-2] + code_size.to_bytes(2, "little")
+
             out.extend(len(data).to_bytes(2, "little"))
             out.extend(data)
             
