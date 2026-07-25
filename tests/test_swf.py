@@ -8,6 +8,8 @@ from py_swf.swf_parser import SWFFile, SWFTag, make_rect, parse_rect, BitStream
 from py_swf.avm1 import assemble_avm1, disassemble_avm1
 from py_swf.avm2 import ConstantPool, MethodInfo, MethodBodyInfo, ABCFile, assemble_instructions, disassemble_instructions
 from py_swf.shapes import parse_shape_tag, shape_to_svg
+from py_swf.exporters import export_scripts
+from py_swf.as3_decompiler import decompile_method_to_as3
 
 def test_rect():
     print("Testing RECT bit packing/unpacking...")
@@ -298,6 +300,183 @@ def test_shape_parse_and_svg():
     assert "rgba(255,0,0,1.000)" in svg, "Expected red fill not found in SVG output"
     assert "M 0.00 0.00" in svg, "Expected moveto command not found in SVG path"
     print("DefineShape parse/SVG test passed!")
+
+
+def test_decompile_method_to_as3_structure():
+    print("Testing AS3-style decompilation output...")
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 1
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(
+        pool,
+        'findpropstrict trace\npushstring "Hello"\ncallpropvoid trace 1\nreturnvoid'
+    )
+
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+
+    output = decompile_method_to_as3(abc, mb, method_name="example")
+
+    assert "function example" in output, "Expected function signature in decompiled output"
+    assert "trace(\"Hello\")" in output, "Expected a human-readable trace call"
+    assert "return;" in output, "Expected a structured return statement"
+    print("AS3 decompilation tests passed!")
+
+
+def test_decompile_if_else_structure():
+    print("Testing AS3-style if/else decompilation...")
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 1
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(
+        pool,
+        'pushtrue\niffalse L_else\npushstring "then"\ncallpropvoid trace 1\njump L_end\nL_else:\npushstring "else"\ncallpropvoid trace 1\nL_end:\nreturnvoid'
+    )
+
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+
+    output = decompile_method_to_as3(abc, mb, method_name="branching")
+
+    assert "if (condition)" in output, "Expected an if statement in the decompiled output"
+    assert "else" in output, "Expected an else branch in the decompiled output"
+    print("If/else decompilation test passed!")
+
+
+def test_decompile_simple_loop_structure():
+    print("Testing AS3-style loop decompilation...")
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 1
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(
+        pool,
+        'pushint 0\nsetlocal_0\nL_loop:\ngetlocal_0\npushint 3\niflt L_body\njump L_end\nL_body:\npushstring "loop"\ncallpropvoid trace 1\ngetlocal_0\npushint 1\nadd\nsetlocal_0\njump L_loop\nL_end:\nreturnvoid'
+    )
+
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+
+    output = decompile_method_to_as3(abc, mb, method_name="looping")
+
+    assert "while" in output or "for" in output, "Expected a loop structure in the decompiled output"
+    print("Loop decompilation test passed!")
+
+
+def test_export_scripts_to_files(tmp_path):
+    print("Testing script export to disk...")
+
+    swf = SWFFile()
+    swf.signature = "FWS"
+    swf.version = 10
+    swf.rect = {"xmin": 0, "xmax": 1100, "ymin": 0, "ymax": 900}
+    swf.frame_rate = 12.0
+    swf.frame_count = 1
+
+    avm1_bytes = assemble_avm1('push "hello"\ntrace\nend')
+    swf.tags.append(SWFTag(12, avm1_bytes))
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+    abc_payload = bytearray()
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 0
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(pool, 'findpropstrict trace\npushstring "Hello AVM2"\ncallpropvoid trace 1\nreturnvoid')
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+    abc_bytes = abc.serialize()
+    swf.tags.append(SWFTag(82, (0).to_bytes(4, "little") + b"ExportedABC\x00" + abc_bytes))
+
+    export_paths = export_scripts(swf, tmp_path)
+
+    assert len(export_paths) >= 2, "Expected at least one AVM1 and one AVM2 export"
+    files = sorted(p.name for p in export_paths)
+    assert any(name.endswith(".avm1.as") for name in files), "AVM1 export name mismatch"
+    assert any(name.endswith(".avm2.as") for name in files), "AVM2 export name mismatch"
+    index_file = tmp_path / "script_index.txt"
+    assert index_file.exists(), "Index file should be created"
+    printed = index_file.read_text(encoding="utf-8")
+    assert "AVM1" in printed and "AVM2" in printed, "Index file missing script summary"
+    print("Script export tests passed!")
 
 
 if __name__ == "__main__":

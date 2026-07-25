@@ -15,6 +15,8 @@ from py_swf.avm1 import disassemble_avm1, assemble_avm1
 from py_swf.avm2 import ABCFile, disassemble_instructions, assemble_instructions, build_method_mapping, resolve_multiname
 from py_swf.resources import export_image, replace_image
 from py_swf.shapes import shape_to_svg, SHAPE_TAG_TYPES
+from py_swf.exporters import export_scripts
+from py_swf.as3_decompiler import decompile_method_to_as3
 from gui.abc_explorer import ABCExplorer
 from gui.editor import CodeEditor, AssemblyHighlighter
 
@@ -71,6 +73,11 @@ class MainWindow(QMainWindow):
         self.replace_image_action.setToolTip("Replace the selected image tag")
         self.replace_image_action.triggered.connect(self.on_replace_image)
 
+        self.export_scripts_action = QAction("Export Scripts", self)
+        self.export_scripts_action.setEnabled(False)
+        self.export_scripts_action.setToolTip("Export AVM1/AVM2 scripts to files")
+        self.export_scripts_action.triggered.connect(self.on_export_scripts)
+
         toolbar.setIconSize(QSize(18, 18))
         open_action.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
         self.save_action.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
@@ -84,11 +91,13 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.export_image_action)
         toolbar.addAction(self.replace_image_action)
+        toolbar.addAction(self.export_scripts_action)
 
         file_menu.addAction(open_action)
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
         file_menu.addSeparator()
+        file_menu.addAction(self.export_scripts_action)
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
@@ -349,6 +358,7 @@ class MainWindow(QMainWindow):
             
             self.save_action.setEnabled(True)
             self.save_as_action.setEnabled(True)
+            self.export_scripts_action.setEnabled(True)
             
             self.populate_tree()
             self.log(f"Successfully loaded SWF version {swf.version}. File type: {swf.signature}.")
@@ -802,6 +812,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export image:\n{str(e)}")
 
+    def on_export_scripts(self):
+        if not self.swf:
+            return
+        output_dir = QFileDialog.getExistingDirectory(self, "Export Scripts", "")
+        if not output_dir:
+            return
+        try:
+            exported = export_scripts(self.swf, output_dir)
+            self.log(f"Exported scripts to: {output_dir}")
+            QMessageBox.information(
+                self,
+                "Scripts exported",
+                f"Exported {len(exported)} files, including a script index."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export scripts:\n{str(e)}")
+            self.log(f"Script export error: {e}")
+
     def on_replace_image(self):
         selected = self.tree.selectedItems()
         if not selected:
@@ -881,6 +909,7 @@ class MainWindow(QMainWindow):
             method_index = abc.method_bodies.index(mb)
             self.log(f"Disassembling AVM2 method body index={method_index}")
             assembly_text = disassemble_instructions(abc.constant_pool, mb.code)
+            readable_text = decompile_method_to_as3(abc, mb, method_name=method_name or f"method_{mb.method}")
             
             # Resolve return and parameter types from abc.methods[mb.method]
             method_info = abc.methods[mb.method] if mb.method < len(abc.methods) else None
@@ -905,7 +934,7 @@ class MainWindow(QMainWindow):
             header_comments.append(f"# Scope Depth: init={mb.init_scope_depth}, max={mb.max_scope_depth}")
             header_comments.append("")
             
-            full_text = "\n".join(header_comments) + assembly_text
+            full_text = "\n".join(header_comments) + "\n\n=== Readable AS3-style decompilation ===\n" + readable_text + "\n\n=== AVM2 disassembly ===\n" + assembly_text
             self.code_context_label.setText(f"Editing AVM2 Method: {method_name or 'Unknown'}")
             self.code_editor.setPlainText(full_text)
             self.current_code_backup = full_text
