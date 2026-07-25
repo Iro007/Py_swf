@@ -5,19 +5,25 @@ def decompile_method_to_as3(abc, mb, method_name="method"):
     """Create a readable, structured AS3-like pseudo-code from AVM2 bytecode.
 
     This is intentionally lightweight and aimed at producing understandable
-    output for common simple methods rather than full-featured decompilation.
+    output for common simple methods such as simple branches and calls.
     """
     method_info = abc.methods[mb.method] if mb.method < len(abc.methods) else None
     return_type = "*"
     if method_info is not None and method_info.return_type != 0:
         return_type = resolve_multiname(abc.constant_pool, method_info.return_type)
 
+    instructions = _decode_simple_instructions(abc.constant_pool, mb.code)
+    labels = _collect_labels(instructions)
+
     lines = []
     lines.append(f"function {method_name}():{return_type} {{")
 
     stack = []
     pending_target = None
-    for opcode, args in _decode_simple_instructions(abc.constant_pool, mb.code):
+    pending_if = None
+    else_seen = False
+
+    for idx, (opcode, args) in enumerate(instructions):
         if opcode == "findpropstrict":
             pending_target = args[0]
         elif opcode == "pushstring":
@@ -42,6 +48,25 @@ def decompile_method_to_as3(abc, mb, method_name="method"):
             call_args.reverse()
             lines.append(f"    {target}({', '.join(call_args)});")
             pending_target = None
+        elif opcode == "iffalse":
+            condition = "condition"
+            lines.append(f"    if ({condition}) {{")
+            pending_if = (idx, args[0])
+        elif opcode == "jump":
+            if pending_if is not None:
+                _, else_target = pending_if
+                if else_target != args[0]:
+                    lines.append("    } else {")
+                    else_seen = True
+                pending_if = None
+            else:
+                lines.append("    // jump")
+        elif opcode == "label":
+            label_name = args[0] if args else None
+            if label_name and label_name in labels:
+                if else_seen:
+                    lines.append("    }")
+                    else_seen = False
         elif opcode == "returnvoid":
             lines.append("    return;")
         elif opcode == "getlocal_0":
@@ -80,6 +105,16 @@ def _decode_simple_instructions(pool, code):
                 args.append(reader.read_s24())
             elif arg_type == "byte":
                 args.append(reader.read_byte())
+        if mnemonic == "label":
+            args.append("L")
         instructions.append((mnemonic, args))
 
     return instructions
+
+
+def _collect_labels(instructions):
+    labels = set()
+    for opcode, args in instructions:
+        if opcode == "label":
+            labels.add(args[0] if args else "L")
+    return labels

@@ -344,6 +344,87 @@ def test_decompile_method_to_as3_structure():
     print("AS3 decompilation tests passed!")
 
 
+def test_decompile_if_else_structure():
+    print("Testing AS3-style if/else decompilation...")
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 1
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(
+        pool,
+        'pushtrue\niffalse L_else\npushstring "then"\ncallpropvoid trace 1\njump L_end\nL_else:\npushstring "else"\ncallpropvoid trace 1\nL_end:\nreturnvoid'
+    )
+
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+
+    output = decompile_method_to_as3(abc, mb, method_name="branching")
+
+    assert "if (condition)" in output, "Expected an if statement in the decompiled output"
+    assert "else" in output, "Expected an else branch in the decompiled output"
+    print("If/else decompilation test passed!")
+
+
+def test_decompile_simple_loop_structure():
+    print("Testing AS3-style loop decompilation...")
+
+    pool = ConstantPool()
+    pool.strings.append("trace")
+
+    method = MethodInfo()
+    method.param_types = []
+    method.return_type = 0
+    method.name = 1
+    method.flags = 0
+
+    mb = MethodBodyInfo()
+    mb.method = 0
+    mb.max_stack = 10
+    mb.local_count = 1
+    mb.init_scope_depth = 1
+    mb.max_scope_depth = 1
+    mb.exceptions = []
+    mb.traits = []
+    mb.code = assemble_instructions(
+        pool,
+        'pushint 0\nsetlocal_0\nL_loop:\ngetlocal_0\npushint 3\niflt L_body\njump L_end\nL_body:\npushstring "loop"\ncallpropvoid trace 1\ngetlocal_0\npushint 1\nadd\nsetlocal_0\njump L_loop\nL_end:\nreturnvoid'
+    )
+
+    abc = ABCFile()
+    abc.constant_pool = pool
+    abc.methods = [method]
+    abc.metadata = []
+    abc.instances = []
+    abc.classes = []
+    abc.scripts = []
+    abc.method_bodies = [mb]
+
+    output = decompile_method_to_as3(abc, mb, method_name="looping")
+
+    assert "while" in output or "for" in output, "Expected a loop structure in the decompiled output"
+    print("Loop decompilation test passed!")
+
+
 def test_export_scripts_to_files(tmp_path):
     print("Testing script export to disk...")
 
