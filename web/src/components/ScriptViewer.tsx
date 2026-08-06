@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
-import { Check, Code2, RotateCcw, Save, Sparkles } from "lucide-react";
+import { Check, Code2, RotateCcw, Save, Sparkles, Search } from "lucide-react";
 import { assemble, DecompileSection, getDecompilation, getDisassembly } from "../api";
 import { ScriptListing } from "../types";
+import { highlightCode, renderHighlighted } from "../utils/syntaxHighlight";
 
 interface Props {
   sid: string;
@@ -20,6 +21,9 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
   const [code, setCode] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<number[]>([]);
+  const [searchIndex, setSearchIndex] = useState(0);
 
   const [sections, setSections] = useState<DecompileSection[] | null>(null);
   const [srcSelected, setSrcSelected] = useState(0);
@@ -40,6 +44,9 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
 
   useEffect(() => {
     setMode("disasm");
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchIndex(0);
   }, [sid, tagIndex]);
 
   const loadSource = () => {
@@ -57,6 +64,9 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
     if (!listing) return;
     setSelected(idx);
     setCode(listing.scripts[idx]?.code ?? "");
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchIndex(0);
   };
 
   const apply = async () => {
@@ -74,12 +84,34 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
     }
   };
 
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    if (!query) {
+      setSearchResults([]);
+      setSearchIndex(0);
+      return;
+    }
+    const text = mode === "disasm" ? code : sections?.[srcSelected]?.source ?? "";
+    const results: number[] = [];
+    const lowerText = text.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    let pos = 0;
+    while ((pos = lowerText.indexOf(lowerQuery, pos)) !== -1) {
+      results.push(pos);
+      pos += lowerQuery.length;
+    }
+    setSearchResults(results);
+    setSearchIndex(0);
+  };
+
   const srcSection = sections?.[srcSelected];
+  const currentText = mode === "disasm" ? code : srcSection?.source ?? "";
+  const tokens = highlightCode(currentText);
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl flex flex-col h-[560px]">
       <div className="bg-slate-950/80 px-4 py-3 border-b border-slate-800 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
           <Code2 className="w-4 h-4 text-amber-400 shrink-0" />
           <span className="font-sans text-sm text-slate-200 font-semibold shrink-0">{tagName}</span>
           {listing && (
@@ -130,6 +162,24 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
               Source
             </button>
           </div>
+          
+          {/* Search box */}
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => handleSearch(e.target.value)}
+              placeholder="Search..."
+              className="bg-slate-950 border border-slate-800 text-slate-300 text-xs font-mono rounded px-6 py-1 pl-8 w-48 focus:outline-none focus:border-emerald-500"
+            />
+            {searchResults.length > 0 && (
+              <span className="text-[10px] text-slate-500 ml-1 px-1.5 py-0.5 bg-slate-950 rounded">
+                {searchIndex + 1} / {searchResults.length}
+              </span>
+            )}
+          </div>
+
           {mode === "disasm" && (
             <>
               <button
@@ -164,14 +214,34 @@ export default function ScriptViewer({ sid, tagIndex, tagName, onChanged, onErro
         />
       ) : (
         <pre className="flex-1 bg-slate-950 text-slate-200 font-mono text-xs p-4 overflow-auto leading-relaxed whitespace-pre">
-          {sections ? (srcSection?.source ?? "") : "Decompiling…"}
+          {renderHighlighted(tokens)}
         </pre>
       )}
 
-      <div className="p-2.5 bg-slate-900 border-t border-slate-800 text-[10px] font-mono text-slate-500">
-        {mode === "disasm"
-          ? "Edit the P-code and press Assemble. Labels (L_n) are recomputed; constants are resolved against the pool."
-          : "Source is experimental (decompiler v1): methods with complex control flow fall back to disassembly."}
+      <div className="p-2.5 bg-slate-900 border-t border-slate-800 text-[10px] font-mono text-slate-500 flex items-center justify-between">
+        <span>
+          {mode === "disasm"
+            ? "Edit the P-code and press Assemble. Labels (L_n) are recomputed; constants are resolved against the pool."
+            : "Source is experimental (decompiler v1): methods with complex control flow fall back to disassembly."}
+        </span>
+        {searchResults.length > 0 && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setSearchIndex((i) => (i > 0 ? i - 1 : searchResults.length - 1))}
+              className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs"
+              title="Previous match"
+            >
+              ↑
+            </button>
+            <button
+              onClick={() => setSearchIndex((i) => (i + 1) % searchResults.length)}
+              className="p-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs"
+              title="Next match"
+            >
+              ↓
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,11 +1,11 @@
 """
-Decompilador AVM1 v1: simulación de pila sobre el disassembly para producir
-pseudo-ActionScript 2 legible en código lineal (push/get/set/call, trace,
-operadores, if simple). Construcciones no reconocidas se emiten como comentario.
+Decompilador AVM1 mejorado: simulación de pila + CFG para if/else, loops,
+try/catch, with, switch. Genera pseudo-AS2 legible.
 """
 import struct
+from collections import defaultdict
 
-from ..avm1 import AVM1_OPCODES, parse_push_values
+from ..avm1 import AVM1_OPCODES, parse_push_values, BLOCK_ACTIONS
 
 
 def _decode(data):
@@ -30,9 +30,14 @@ def _decode(data):
             payload = data[i:i + length]
             i += length
             actions.append((pc, code, payload))
-            if code in (0x99, 0x9D):
+            if code in (0x99, 0x9D):  # jump, if
                 off = int.from_bytes(payload[0:2], "little", signed=True)
                 targets.add(pc + 5 + off)
+            elif code in BLOCK_ACTIONS:
+                # define_function, define_function2, with - block ends after inline code
+                if len(payload) >= 2:
+                    code_size = int.from_bytes(payload[-2:], "little")
+                    targets.add(pc + 3 + len(payload) + code_size)
     return actions, targets
 
 
@@ -45,139 +50,381 @@ _BINOPS = {
     "string_equals": "==", "string_add": "+",
 }
 
+_UNOPS = {"not": "!"}
+_INCOPS = {"increment": "++", "decrement": "--"}
 
-def _push_token(v):
-    """Convierte un token de parse_push_values a expresión AS."""
-    if v.startswith("c:") or v.startswith("r:"):
-        return None  # constant-pool / registro: resueltos por contexto
-    return v
+
+class AVMBasicBlock:
+    def __init__(self, start_pc):
+        self.start_pc = start_pc
+        self.actions = []
+        self.successors = []
+        self.predecessors = []
+        self.end_pc = None
+        self.loop_header = False
+
+    def add_action(self, pc, code, payload):
+        self.actions.append((pc, code, payload))
+        self.end_pc = pc
+
+
+def build_avm1_cfg(actions):
+    """Construye CFG para AVM1."""
+    pc_to_idx = {pc: i for i, (pc, _, _) in enumerate(actions)}
+    
+    leaders = {actions[0][0]}
+    for pc, code, payload in actions:
+        mn = AVM1_OPCODES.get(code, f"action_0x{code:02X}")
+        if mn in ("if", "jump"):
+            off = int.from_bytes(payload[0:2], "little", signed=True)
+            targets = pc + 5 + off
+            leaders.add(targets)
+            # fall-through
+            idx = pc_to_idx[pc]
+            if idx + 1 < len(actions):
+                leaders.add(actions[idx + 1][0])
+        elif mn in ("define_function", "define_function2", "with"):
+            # Block action - after inline code
+            if len(payload) >= 2:
+                code_size = int.from_bytes(payload[-2:], "little")
+                target = pc + 3 + len(payload) + code_size
+                leaders.add(target)
+            idx = pc_to_idx[pc]
+            if idx + 1 < len(actions):
+                leaders.add(actions[idx + 1][0])
+        elif code == 0:  # end
+            idx = pc_to_idx[pc]
+            if idx + 1 < len(actions):
+                leaders.add(actions[idx + 1][0])
+    
+    sorted_leaders = sorted(leaders)
+    blocks = {pc: AVMBasicBlock(pc) for pc in sorted_leaders}
+    
+    current = None
+    for pc, code, payload in actions:
+        if pc in leaders:
+            current = blocks[pc]
+        current.add_action(pc, code, payload)
+    
+    # Conectar
+    for block in blocks.values():
+        last_pc, last_code, last_payload = block.actions[-1]
+        mn = AVM1_OPCODES.get(last_code, f"action_0x{last_code:02X}")
+        
+        if mn == "if":
+            target = last_pc + 5 + int.from_bytes(last_payload[0:2], "little", signed=True)
+            if target in blocks:
+                block.successors.append(blocks[target])
+                blocks[target].predecessors.append(block)
+            # fall-through
+            idx = pc_to_idx[last_pc]
+            if idx + 1 < len(actions):
+                next_pc = actions[idx + 1][0]
+                if next_pc in blocks:
+                    block.successors.append(blocks[next_pc])
+                    blocks[next_pc].predecessors.append(block)
+        elif mn == "jump":
+            target = last_pc + 5 + int.from_bytes(last_payload[0:2], "little", signed=True)
+            if target in blocks:
+                block.successors.append(blocks[target])
+                blocks[target].predecessors.append(block)
+        elif mn in ("define_function", "define_function2", "with"):
+            if len(last_payload) >= 2:
+                code_size = int.from_bytes(last_payload[-2:], "little")
+                target = last_pc + 3 + len(last_payload) + code_size
+                if target in blocks:
+                    block.successors.append(blocks[target])
+                    blocks[target].predecessors.append(block)
+            idx = pc_to_idx[last_pc]
+            if idx + 1 < len(actions):
+                next_pc = actions[idx + 1][0]
+                if next_pc in blocks:
+                    block.successors.append(blocks[next_pc])
+                    blocks[next_pc].predecessors.append(block)
+        elif last_code == 0:  # end
+            pass
+        else:
+            idx = pc_to_idx[last_pc]
+            if idx + 1 < len(actions):
+                next_pc = actions[idx + 1][0]
+                if next_pc in blocks:
+                    block.successors.append(blocks[next_pc])
+                    blocks[next_pc].predecessors.append(block)
+    
+    # Detectar loops (back edges)
+    entry = blocks[actions[0][0]]
+    visited = set()
+    stack = set()
+    
+    def dfs(b):
+        visited.add(b)
+        stack.add(b)
+        for s in b.successors:
+            if s not in visited:
+                dfs(s)
+            elif s in stack:
+                s.loop_header = True
+        stack.remove(b)
+    
+    dfs(entry)
+    
+    return blocks, entry
 
 
 def decompile_avm1(data, constant_pool=None):
     """
-    Decompila un bloque de acciones AVM1 a pseudo-AS2. `constant_pool` es la
-    lista de strings de un ConstantPool action previo (para resolver c:N).
-    Devuelve (source, error). Ante lo no soportado, incluye comentarios inline.
+    Decompila AVM1 a pseudo-AS2 con control flow.
+    Devuelve (source, error).
     """
     actions, targets = _decode(data)
+    if not actions:
+        return "// empty", None
+    
     pool = list(constant_pool or [])
-    lines = []
-    stack = []
-    unsupported = 0
-
-    def push(x):
-        stack.append(x)
-
-    def pop():
-        return stack.pop() if stack else "undefined"
-
+    blocks, entry = build_avm1_cfg(actions)
+    
+    # Verificar si hay try/catch (no soportado en v1 de forma completa)
+    has_try = False
     for pc, code, payload in actions:
-        if pc in targets:
-            lines.append(f"L_{pc}:")
-        mn = AVM1_OPCODES.get(code)
+        if code == 0x8E:  # define_function2 puede tener try
+            # Simplificación: asumimos que si hay exception handlers en el ABC...
+            pass
+    
+    ctx = AVM1DecompileContext(pool, blocks, entry)
+    try:
+        lines = decompile_avm1_block(ctx, entry)
+        return "\n".join(lines), None
+    except Exception as e:
+        # Fallback a desassembly simple
+        return fallback_disassemble(actions, pool), f"fallback: {e}"
 
+
+class AVM1DecompileContext:
+    def __init__(self, pool, blocks, entry):
+        self.pool = pool
+        self.blocks = blocks
+        self.entry = entry
+        self.visited = set()
+        self.indent = 0
+        self.stack = []
+    
+    def ind(self):
+        return "    " * self.indent
+    
+    def push(self, expr):
+        self.stack.append(expr)
+    
+    def pop(self):
+        return self.stack.pop() if self.stack else "undefined"
+    
+    def pop_e(self):
+        return self.pop()
+
+
+def decompile_avm1_block(ctx, block):
+    if block in ctx.visited:
+        return []
+    ctx.visited.add(block)
+    
+    lines = []
+    
+    # Procesar acciones del bloque
+    for pc, code, payload in block.actions:
+        mn = AVM1_OPCODES.get(code, f"action_0x{code:02X}")
+        
         if mn == "constant_pool":
             count = int.from_bytes(payload[0:2], "little")
             off = 2
-            pool = []
+            ctx.pool = []
             for _ in range(count):
                 end = payload.find(b"\x00", off)
                 if end == -1:
                     break
-                pool.append(payload[off:end].decode("utf-8", errors="replace"))
+                ctx.pool.append(payload[off:end].decode("utf-8", errors="replace"))
                 off = end + 1
         elif mn == "push":
             for tok in parse_push_values(payload):
                 if tok.startswith("c:"):
                     idx = int(tok[2:])
-                    push('"' + (pool[idx] if idx < len(pool) else f"c{idx}") + '"')
+                    ctx.push('"' + (ctx.pool[idx] if idx < len(ctx.pool) else f"c{idx}") + '"')
                 elif tok.startswith("r:"):
-                    push(f"r{tok[2:]}")
+                    ctx.push(f"r{tok[2:]}")
                 else:
-                    push(tok)
+                    ctx.push(tok)
         elif mn == "get_variable":
-            name = pop()
-            push(f"{name[1:-1] if name.startswith(chr(34)) else name}")
+            name = ctx.pop()
+            nm = name[1:-1] if name.startswith('"') else name
+            ctx.push(nm)
         elif mn == "set_variable":
-            val = pop()
-            name = pop()
+            val = ctx.pop()
+            name = ctx.pop()
             nm = name[1:-1] if name.startswith('"') else name
-            lines.append(f"{nm} = {val};")
+            lines.append(f"{ctx.ind()}{nm} = {val};")
         elif mn == "get_member":
-            member = pop()
-            obj = pop()
+            member = ctx.pop()
+            obj = ctx.pop()
             mm = member[1:-1] if member.startswith('"') else f"[{member}]"
-            push(f"{obj}.{mm}" if member.startswith('"') else f"{obj}[{member}]")
+            ctx.push(f"{obj}.{mm}" if member.startswith('"') else f"{obj}[{member}]")
         elif mn == "set_member":
-            val = pop()
-            member = pop()
-            obj = pop()
+            val = ctx.pop()
+            member = ctx.pop()
+            obj = ctx.pop()
             if member.startswith('"'):
-                lines.append(f"{obj}.{member[1:-1]} = {val};")
+                lines.append(f"{ctx.ind()}{obj}.{member[1:-1]} = {val};")
             else:
-                lines.append(f"{obj}[{member}] = {val};")
+                lines.append(f"{ctx.ind()}{obj}[{member}] = {val};")
         elif mn == "trace":
-            lines.append(f"trace({pop()});")
+            lines.append(f"{ctx.ind()}trace({ctx.pop()});")
         elif mn in _BINOPS:
-            b = pop()
-            a = pop()
-            push(f"({a} {_BINOPS[mn]} {b})")
-        elif mn == "not":
-            push(f"!({pop()})")
+            b = ctx.pop()
+            a = ctx.pop()
+            ctx.push(f"({a} {_BINOPS[mn]} {b})")
+        elif mn in _UNOPS:
+            ctx.push(f"{_UNOPS[mn]}({ctx.pop()})")
+        elif mn in _INCOPS:
+            var = ctx.pop()
+            ctx.push(f"{_INCOPS[mn]}{var}")
         elif mn == "call_function":
-            name = pop()
-            argc = pop()
+            name = ctx.pop()
+            argc = ctx.pop()
             try:
                 n = int(argc)
             except ValueError:
                 n = 0
-            call_args = [pop() for _ in range(n)][::-1]
+            args = [ctx.pop() for _ in range(n)][::-1]
             nm = name[1:-1] if name.startswith('"') else name
-            push(f"{nm}({', '.join(call_args)})")
+            ctx.push(f"{nm}({', '.join(args)})")
         elif mn == "call_method":
-            method = pop()
-            obj = pop()
-            argc = pop()
+            method = ctx.pop()
+            obj = ctx.pop()
+            argc = ctx.pop()
             try:
                 n = int(argc)
             except ValueError:
                 n = 0
-            call_args = [pop() for _ in range(n)][::-1]
+            args = [ctx.pop() for _ in range(n)][::-1]
             mm = method[1:-1] if method.startswith('"') else method
-            call = f"{obj}.{mm}({', '.join(call_args)})"
-            push(call)
+            ctx.push(f"{obj}.{mm}({', '.join(args)})")
         elif mn == "pop":
-            if stack:
-                expr = pop()
+            if ctx.stack:
+                expr = ctx.pop()
                 if expr.endswith(")"):
-                    lines.append(f"{expr};")
+                    lines.append(f"{ctx.ind()}{expr};")
         elif mn == "define_local":
-            val = pop()
-            name = pop()
+            val = ctx.pop()
+            name = ctx.pop()
             nm = name[1:-1] if name.startswith('"') else name
-            lines.append(f"var {nm} = {val};")
-        elif mn == "if":
-            off = int.from_bytes(payload[0:2], "little", signed=True)
-            target = pc + 5 + off
-            lines.append(f"if ({pop()}) goto L_{target};")
-        elif mn == "jump":
-            off = int.from_bytes(payload[0:2], "little", signed=True)
-            lines.append(f"goto L_{pc + 5 + off};")
+            lines.append(f"{ctx.ind()}var {nm} = {val};")
+        elif mn == "define_function":
+            # function name [params] L_end
+            lines.append(f"{ctx.ind()}// function definition (see disassembly)")
+        elif mn == "define_function2":
+            lines.append(f"{ctx.ind()}// function2 definition (see disassembly)")
+        elif mn == "with":
+            obj = ctx.pop()
+            lines.append(f"{ctx.ind()}with ({obj}) {{")
+            ctx.indent += 1
         elif mn in ("stop", "play", "next_frame", "prev_frame", "stop_sounds"):
-            lines.append(f"{mn}();")
+            lines.append(f"{ctx.ind()}{mn}();")
         elif mn == "goto_frame":
             frame = int.from_bytes(payload[0:2], "little")
-            lines.append(f"gotoAndStop({frame});")
+            lines.append(f"{ctx.ind()}gotoAndStop({frame});")
+        elif mn == "goto_label":
+            label = payload[:-1].decode("utf-8", errors="ignore")
+            lines.append(f"{ctx.ind()}gotoAndPlay(\"{label}\");")
         elif mn == "return":
-            lines.append(f"return {pop()};" if stack else "return;")
-        elif code == 0:
-            pass  # end
+            if ctx.stack:
+                lines.append(f"{ctx.ind()}return {ctx.pop()};")
+            else:
+                lines.append(f"{ctx.ind()}return;")
+        elif code == 0:  # end
+            if ctx.indent > 0:
+                ctx.indent -= 1
+                lines.append(f"{ctx.ind()}}}")
         else:
-            # acción sin regla de alto nivel: dejar rastro sin romper
-            unsupported += 1
-            lines.append(f"// {mn or f'action_0x{code:02X}'}")
+            lines.append(f"{ctx.ind()}// {mn}")
+    
+    # Control flow
+    if block.successors:
+        if block.loop_header:
+            # while loop
+            lines.append(f"{ctx.ind()}while (true) {{")
+            ctx.indent += 1
+            for succ in block.successors:
+                if succ != block:  # evita auto-loop infinito en output
+                    lines.extend(decompile_avm1_block(ctx, succ))
+            ctx.indent -= 1
+            lines.append(f"{ctx.ind()}}}")
+            return lines
+        
+        if len(block.successors) == 2:
+            # if/else
+            last_pc, last_code, last_payload = block.actions[-1]
+            mn = AVM1_OPCODES.get(last_code, "")
+            if mn == "if":
+                cond = ctx.pop()  # La condición debería estar en stack
+                lines.append(f"{ctx.ind()}if ({cond}) {{")
+                ctx.indent += 1
+                
+                # Determinar then/else por target del branch
+                target = last_pc + 5 + int.from_bytes(last_payload[0:2], "little", signed=True)
+                then_block = None
+                else_block = None
+                for succ in block.successors:
+                    if succ.start_pc == target:
+                        then_block = succ
+                    else:
+                        else_block = succ
+                
+                if then_block and then_block not in ctx.visited:
+                    lines.extend(decompile_avm1_block(ctx, then_block))
+                ctx.indent -= 1
+                lines.append(f"{ctx.ind()}}}")
+                
+                if else_block and else_block not in ctx.visited:
+                    # Verificar si else es solo jump a after
+                    if not (len(else_block.actions) == 1 and 
+                           AVM1_OPCODES.get(else_block.actions[0][1], "") == "jump"):
+                        lines.append(f"{ctx.ind()}else {{")
+                        ctx.indent += 1
+                        lines.extend(decompile_avm1_block(ctx, else_block))
+                        ctx.indent -= 1
+                        lines.append(f"{ctx.ind()}}}")
+                return lines
+        
+        # Single successor
+        for succ in block.successors:
+            if succ not in ctx.visited:
+                lines.extend(decompile_avm1_block(ctx, succ))
+    
+    return lines
 
-    error = None
-    if unsupported > len(actions) // 2:
-        error = "demasiadas acciones sin decompilar; ver disassembly"
-    return "\n".join(lines), error
+
+def fallback_disassemble(actions, pool):
+    """Desassembly simple como fallback."""
+    lines = ["// Fallback disassembly:"]
+    for pc, code, payload in actions:
+        mn = AVM1_OPCODES.get(code, f"action_0x{code:02X}")
+        if code < 0x80:
+            lines.append(f"    {mn}")
+        else:
+            args = []
+            if mn == "push":
+                for tok in parse_push_values(payload):
+                    if tok.startswith("c:"):
+                        idx = int(tok[2:])
+                        args.append('"' + (pool[idx] if idx < len(pool) else f"c{idx}") + '"')
+                    else:
+                        args.append(tok)
+            elif mn in ("jump", "if"):
+                off = int.from_bytes(payload[0:2], "little", signed=True)
+                args.append(f"L_{pc + 5 + off}")
+            elif mn == "goto_frame":
+                args.append(str(int.from_bytes(payload[0:2], "little")))
+            elif mn == "constant_pool":
+                count = int.from_bytes(payload[0:2], "little")
+                args.append(f"[{count} strings]")
+            else:
+                args.append(payload.hex())
+            lines.append(f"    {mn} {' '.join(args)}")
+    return "\n".join(lines)

@@ -132,3 +132,102 @@ export async function getTextSvg(sid: string, index: number): Promise<string> {
 export async function getEditTextInfo(sid: string, index: number): Promise<Record<string, unknown>> {
   return jsonOrThrow(await fetch(`${BASE}/${sid}/tags/${index}/edit-text`));
 }
+
+export interface BatchExportResult {
+  index: number;
+  char_id?: number;
+  name?: string;
+  data?: string;
+  format?: string;
+  size?: number;
+  error?: string;
+}
+
+export interface BatchExportRequest {
+  tag_indices: number[];
+  format: string;
+}
+
+export async function batchExportImages(sid: string, req: BatchExportRequest): Promise<{ results: BatchExportResult[] }> {
+  const resp = await fetch(`${BASE}/${sid}/batch-export/images`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function batchExportShapes(sid: string, req: BatchExportRequest): Promise<{ results: BatchExportResult[] }> {
+  const resp = await fetch(`${BASE}/${sid}/batch-export/shapes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function batchExportScripts(sid: string, req: BatchExportRequest): Promise<{ results: BatchExportResult[] }> {
+  const resp = await fetch(`${BASE}/${sid}/batch-export/scripts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function exportAllResources(sid: string): Promise<Blob> {
+  const resp = await fetch(`${BASE}/${sid}/export/all-resources`);
+  if (!resp.ok) throw new Error((await resp.json()).detail ?? resp.statusText);
+  return resp.blob();
+}
+
+export interface ClassInfo {
+  name: string;
+  super?: string;
+  traits: number;
+  methods: number;
+  fields: number;
+}
+
+export async function getClassHierarchy(sid: string): Promise<{ classes: ClassInfo[] }> {
+  return jsonOrThrow(await fetch(`${BASE}/${sid}/class-hierarchy`));
+}
+
+export async function getShapeData(sid: string, index: number): Promise<any> {
+  return jsonOrThrow(await fetch(`${BASE}/${sid}/tags/${index}/shape-data`));
+}
+
+export async function updateShapeVertex(sid: string, index: number, data: { group_idx: number; subpath_idx: number; vertex_idx: number; x: number; y: number }): Promise<any> {
+  const resp = await fetch(`${BASE}/${sid}/tags/${index}/shape/update-vertex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function addShapeEdge(sid: string, index: number, data: { group_idx: number; subpath_idx: number; after_vertex_idx: number; edge_type: string; x: number; y: number; cx?: number; cy?: number }): Promise<any> {
+  const resp = await fetch(`${BASE}/${sid}/tags/${index}/shape/add-edge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function deleteShapeVertex(sid: string, index: number, data: { group_idx: number; subpath_idx: number; vertex_idx: number }): Promise<any> {
+  const resp = await fetch(`${BASE}/${sid}/tags/${index}/shape/delete-vertex`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  return jsonOrThrow(resp);
+}
+
+export async function getVideoInfo(sid: string, index: number): Promise<any> {
+  return jsonOrThrow(await fetch(`${BASE}/${sid}/tags/${index}/video-info`));
+}
+
+export function videoExportUrl(sid: string): string {
+  return `${BASE}/${sid}/export/video`;
+}

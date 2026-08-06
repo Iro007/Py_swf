@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .routers import export, files
+from py_swf.plugins import get_plugin_api_router
 
 app = FastAPI(title="py_swf_editor", version="0.1.0")
 
@@ -17,6 +18,7 @@ app.add_middleware(
 
 app.include_router(files.router)
 app.include_router(export.router)
+app.include_router(get_plugin_api_router())
 
 # Serve the built web UI when available (web/dist after `npm run build`)
 _web_dist = Path(__file__).resolve().parent.parent / "web" / "dist"

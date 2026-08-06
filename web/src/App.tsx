@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from "react";
 import {
   AlertCircle, Folder, FolderOpen, FileSignature, Layers, Save, Upload,
+  Download, Package, Code2, Search, ChevronLeft, ChevronRight,
 } from "lucide-react";
 
 import { FileInfo, TagInfo, TreeItem, SWFCategory } from "./types";
-import { downloadUrl, getTags, uploadSwf } from "./api";
+import { downloadUrl, getTags, uploadSwf, batchExportImages, batchExportShapes, batchExportScripts, exportAllResources, getClassHierarchy, ClassInfo } from "./api";
 
 import ShapeViewer from "./components/ShapeViewer";
 import ImageViewer from "./components/ImageViewer";
@@ -35,6 +36,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"preview" | "hex">("preview");
   const [errorText, setErrorText] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [batchExportOpen, setBatchExportOpen] = useState(false);
+  const [batchExportType, setBatchExportType] = useState<"images" | "shapes" | "scripts">("images");
+  const [batchExportFormat, setBatchExportFormat] = useState("png");
+  const [classHierarchyOpen, setClassHierarchyOpen] = useState(false);
+  const [classHierarchy, setClassHierarchy] = useState<ClassInfo[]>([]);
 
   const refreshTags = async (sid: string) => {
     setTags(await getTags(sid));
@@ -60,6 +66,80 @@ export default function App() {
   const markDirty = () => {
     setDirty(true);
     if (fileInfo) refreshTags(fileInfo.session_id).catch(() => undefined);
+  };
+
+  const handleBatchExport = async () => {
+    if (!fileInfo) return;
+    const indices = tags
+      .filter(t => {
+        if (batchExportType === "images") return IMAGE_TAGS.includes(t.code);
+        if (batchExportType === "shapes") return SHAPE_TAGS.includes(t.code) || MORPH_TAGS.includes(t.code);
+        if (batchExportType === "scripts") return SCRIPT_TAGS.includes(t.code);
+        return false;
+      })
+      .map(t => t.index);
+    
+    if (indices.length === 0) {
+      setErrorText(`No ${batchExportType} tags found to export`);
+      return;
+    }
+    
+    try {
+      let result;
+      if (batchExportType === "images") {
+        result = await batchExportImages(sid, { tag_indices: indices, format: batchExportFormat });
+      } else if (batchExportType === "shapes") {
+        result = await batchExportShapes(sid, { tag_indices: indices, format: batchExportFormat });
+      } else {
+        result = await batchExportScripts(sid, { tag_indices: indices, format: batchExportFormat });
+      }
+      
+      // Create download links for each result
+      for (const r of result.results) {
+        if (r.data && !r.error) {
+          const blob = batchExportFormat === "svg" || batchExportType === "scripts"
+            ? new Blob([r.data], { type: "text/plain" })
+            : await (await fetch(`data:application/octet-stream;base64,${r.data}`)).blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${fileInfo.filename}_tag${r.index}.${r.format || batchExportFormat}`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+      }
+      
+      const successCount = result.results.filter(r => !r.error).length;
+      setErrorText(`Exported ${successCount}/${indices.length} ${batchExportType}`);
+    } catch (e: any) {
+      setErrorText(`Batch export failed: ${e.message}`);
+    }
+  };
+
+  const handleExportAll = async () => {
+    if (!fileInfo) return;
+    try {
+      const blob = await exportAllResources(sid);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileInfo.filename}.resources.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      setErrorText(`Export all failed: ${e.message}`);
+    }
+  };
+
+  const handleClassHierarchy = async () => {
+    if (!fileInfo) return;
+    try {
+      const data = await getClassHierarchy(sid);
+      setClassHierarchy(data.classes);
+      setClassHierarchyOpen(true);
+    } catch (e: any) {
+      setErrorText(`Class hierarchy failed: ${e.message}`);
+    }
   };
 
   const toggleNode = (nodeId: string) => {
@@ -143,6 +223,37 @@ export default function App() {
             <span>Open SWF</span>
             <input type="file" accept=".swf" onChange={handleFileUpload} className="hidden" />
           </label>
+
+          {fileInfo && (
+            <>
+              <button
+                onClick={handleExportAll}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition active:scale-95 shadow"
+                title="Export all resources as ZIP"
+              >
+                <Package className="w-3.5 h-3.5 text-purple-400" />
+                <span>Export All</span>
+              </button>
+
+              <button
+                onClick={handleClassHierarchy}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition active:scale-95 shadow"
+                title="View class hierarchy"
+              >
+                <Code2 className="w-3.5 h-3.5 text-blue-400" />
+                <span>Classes</span>
+              </button>
+
+              <button
+                onClick={() => setBatchExportOpen(true)}
+                className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition active:scale-95 shadow"
+                title="Batch export selected resource types"
+              >
+                <Download className="w-3.5 h-3.5 text-amber-400" />
+                <span>Batch Export</span>
+              </button>
+            </>
+          )}
 
           <a
             href={fileInfo ? downloadUrl(sid) : undefined}
@@ -494,5 +605,118 @@ export default function App() {
         </main>
       </div>
     </div>
+
+    {/* Batch Export Modal */}
+    {batchExportOpen && (
+      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setBatchExportOpen(false)}>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 w-96 max-w-full shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-white">Batch Export</h3>
+            <button onClick={() => setBatchExportOpen(false)} className="text-slate-400 hover:text-white">✕</button>
+          </div>
+          
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Resource Type</label>
+              <select
+                value={batchExportType}
+                onChange={e => setBatchExportType(e.target.value as "images" | "shapes" | "scripts")}
+                className="w-full bg-slate-950 border border-slate-800 text-slate-300 text-sm rounded px-3 py-2 focus:outline-none focus:border-emerald-500"
+              >
+                <option value="images">Images / Bitmaps</option>
+                <option value="shapes">Shapes / Vectors</option>
+                <option value="scripts">Scripts / ActionScript</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1">Format</label>
+              <select
+                value={batchExportFormat}
+                onChange={e => setBatchExportFormat(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 text-slate-300 text-sm rounded px-3 py-2 focus:outline-none focus:border-emerald-500"
+              >
+                {batchExportType === "scripts" ? (
+                  <option value="asm">ASM (Disassembly)</option>
+                ) : batchExportType === "shapes" ? (
+                  <>
+                    <option value="svg">SVG</option>
+                    <option value="png">PNG (requires rasterization)</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="png">PNG</option>
+                    <option value="jpg">JPG</option>
+                    <option value="svg">SVG (shapes only)</option>
+                  </>
+                )}
+              </select>
+            </div>
+            
+            <div className="text-xs text-slate-500">
+              Available tags: {tags.filter(t => {
+                if (batchExportType === "images") return IMAGE_TAGS.includes(t.code);
+                if (batchExportType === "shapes") return SHAPE_TAGS.includes(t.code) || MORPH_TAGS.includes(t.code);
+                if (batchExportType === "scripts") return SCRIPT_TAGS.includes(t.code);
+                return false;
+              }).length}
+            </div>
+            
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setBatchExportOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-sm font-medium transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBatchExport}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded text-sm font-medium transition"
+              >
+                Export
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Class Hierarchy Modal */}
+    {classHierarchyOpen && (
+      <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setClassHierarchyOpen(false)}>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 w-full max-w-2xl max-h-[80vh] shadow-2xl" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-white">Class Hierarchy (AS3)</h3>
+            <button onClick={() => setClassHierarchyOpen(false)} className="text-slate-400 hover:text-white">✕</button>
+          </div>
+          
+          <div className="max-h-[60vh] overflow-y-auto">
+            {classHierarchy.length === 0 ? (
+              <div className="text-center text-slate-500 py-8">
+                No ActionScript 3 classes found in this SWF.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {classHierarchy.map((cls, i) => (
+                  <div key={i} className="bg-slate-950 border border-slate-800 rounded-lg p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="font-mono text-slate-300">{cls.name}</span>
+                      {cls.super && (
+                        <span className="text-[10px] text-slate-500 px-2 py-0.5 bg-slate-900 rounded">extends {cls.super}</span>
+                      )}
+                    </div>
+                    <div className="flex gap-4 text-xs text-slate-400">
+                      <span>{cls.fields} fields</span>
+                      <span>{cls.methods} methods</span>
+                      <span>{cls.traits} traits</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
   );
 }
