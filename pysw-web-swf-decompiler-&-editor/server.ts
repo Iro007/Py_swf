@@ -91,6 +91,57 @@ ${bytecode || context}`;
     res.json({ status: "ok" });
   });
 
+  // SWF parse endpoint (JSON body with base64 file: { filename, b64 })
+  app.post("/api/parse-swf", async (req, res) => {
+    try {
+      const { filename, b64 } = req.body as { filename?: string; b64?: string };
+      if (!b64) return res.status(400).json({ error: "Request missing base64 payload in 'b64' field" });
+
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length < 8) return res.status(400).json({ error: "File too short to be SWF" });
+
+      const sig = buf.toString("ascii", 0, 3);
+      const version = buf.readUInt8(3);
+      const fileLength = buf.readUInt32LE(4);
+
+      let uncompressed: Buffer;
+      if (sig === "CWS") {
+        const zlib = await import("zlib");
+        const zlibPayload = buf.slice(8);
+        uncompressed = Buffer.concat([buf.slice(0, 8), zlib.inflateSync(zlibPayload)]);
+      } else if (sig === "FWS") {
+        uncompressed = buf;
+      } else if (sig === "ZWS") {
+        return res.status(400).json({ error: "LZMA-compressed ZWS files are not supported by server parser." });
+      } else {
+        return res.status(400).json({ error: `Unknown SWF signature: ${sig}` });
+      }
+
+      const tags: Array<{ type: number; length: number; offset: number }> = [];
+      let offset = 8;
+      while (offset + 2 <= uncompressed.length) {
+        const header = uncompressed.readUInt16LE(offset);
+        offset += 2;
+        const tagType = header >> 6;
+        let tagLen = header & 0x3F;
+        if (tagLen === 0x3F) {
+          if (offset + 4 > uncompressed.length) break;
+          tagLen = uncompressed.readUInt32LE(offset);
+          offset += 4;
+        }
+        if (offset + tagLen > uncompressed.length) break;
+        tags.push({ type: tagType, length: tagLen, offset });
+        offset += tagLen;
+        if (tagType === 0) break;
+      }
+
+      return res.json({ filename: filename || "uploaded.swf", signature: sig, version, fileLength, tagsCount: tags.length, tags });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
