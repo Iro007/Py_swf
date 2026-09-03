@@ -35,6 +35,13 @@ def recover_control_flow(pool, code: bytes) -> str:
     pseudo: List[str] = []
     i = 0
     n = len(lines)
+    # Precompute simple symbolic conditions using stack simulation
+    try:
+        from py_swf.tools.stack_sim import extract_conditions_from_lines
+        cond_map = extract_conditions_from_lines(lines)
+    except Exception:
+        cond_map = {}
+
     while i < n:
         ln = lines[i]
         stripped = ln.strip()
@@ -54,10 +61,12 @@ def recover_control_flow(pool, code: bytes) -> str:
         if mnemonic in COND_MNEMONICS and len(parts) >= 2:
             target = parts[1]
             tgt_idx = label_to_idx.get(target, None)
+            cond = cond_map.get(i)
+            cond_text = cond if cond else '/* condition */'
             if tgt_idx is not None:
                 # if target is before current => loop
                 if tgt_idx < i:
-                    pseudo.append('while (/* condition */) {')
+                    pseudo.append(f'while {cond_text} {{')
                     # include body: from next line until we encounter the label target
                     j = i + 1
                     body_lines = []
@@ -73,7 +82,7 @@ def recover_control_flow(pool, code: bytes) -> str:
                     continue
                 else:
                     # forward conditional -> if
-                    pseudo.append('if (/* condition */) {')
+                    pseudo.append(f'if {cond_text} {{')
                     # include subsequent instructions until the target label
                     j = i + 1
                     body_lines = []
