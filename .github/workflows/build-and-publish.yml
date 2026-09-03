@@ -1,0 +1,39 @@
+name: Build and publish web Docker image
+
+on:
+  push:
+    branches: [ main, 'iro007-swf-web-app' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Build web (docker image)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./pysw-web-swf-decompiler-&-editor
+          file: ./pysw-web-swf-decompiler-&-editor/Dockerfile
+          push: true
+          tags: ${{ github.repository_owner }}/py_swf_web:latest
+          platforms: linux/amd64
+
+      - name: Create artifact (dist)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: pysw-web-swf-decompiler-&-editor/dist
