@@ -115,7 +115,7 @@ export default function ScriptViewer({
     }
   };
 
-  // Export AS ZIP from server
+  // Export AS ZIP from server with preview of ZIP contents
   const exportAsZip = async () => {
     if (!abcB64) {
       setErrorMessage("ABC payload not available for export.");
@@ -133,6 +133,34 @@ export default function ScriptViewer({
         throw new Error(j.error || 'Failed to export ZIP');
       }
       const blob = await resp.blob();
+
+      // Dynamically load JSZip from CDN to inspect contents without adding a build dependency
+      const loadScript = (src: string) => new Promise<void>((resolve, reject) => {
+        if ((window as any).JSZip) return resolve();
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load JSZip'));
+        document.head.appendChild(s);
+      });
+
+      try {
+        await loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+        const JSZip = (window as any).JSZip;
+        const jszip = new JSZip();
+        const zip = await jszip.loadAsync(blob);
+        const names = Object.keys(zip.files);
+        const listPreview = names.slice(0, 200).join('\n');
+        const doDownload = window.confirm(`Archive contents:\n\n${listPreview}\n\nDownload archive?`);
+        if (!doDownload) {
+          setIsLoading(false);
+          return;
+        }
+      } catch (e) {
+        // If preview fails, fall back to direct download
+        console.warn('ZIP preview failed, continuing to download', e);
+      }
+
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

@@ -134,7 +134,25 @@ ${bytecode || context}`;
         return res.status(500).json({ error: py.stderr || 'Python decompiler failed' });
       }
 
-      return res.json({ result: py.stdout });
+      // Optionally request AI-enhanced suggestions if client asked and Gemini key is configured
+      let resultText = py.stdout;
+      if (req.body && req.body.ai && process.env.GEMINI_API_KEY) {
+        try {
+          const aiResp = await fetch(`http://localhost:${PORT}/api/decompile-ai`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bytecode: resultText, taskType: 'decompile', filename: req.body.filename || 'decompiled_tag.swf' })
+          });
+          if (aiResp.ok) {
+            const aiJson = await aiResp.json();
+            return res.json({ result: resultText, ai: aiJson.result });
+          }
+        } catch (e) {
+          console.error('AI augmentation failed:', e);
+        }
+      }
+
+      return res.json({ result: resultText });
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: err.message || 'Unknown error' });

@@ -55,7 +55,20 @@ jobs:
 
       - name: Create artifact (dist)
         if: always()
+        run: |
+          if [ -d "pysw-web-swf-decompiler-&-editor/dist" ]; then
+            cd pysw-web-swf-decompiler-&-editor
+            zip -r ../web-dist.zip dist
+          fi
+      - name: Upload web-dist directory
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: web-dist
           path: pysw-web-swf-decompiler-&-editor/dist
+      - name: Upload web-dist zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-zip
+          path: web-dist.zip
