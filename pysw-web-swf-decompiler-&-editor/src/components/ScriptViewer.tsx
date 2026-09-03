@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Play, Sparkles, Code2, Cpu, FileCode, Check, Send, RotateCw, RefreshCw, AlertCircle } from "lucide-react";
+import { Play, Sparkles, Code2, Cpu, FileCode, Check, Send, RotateCw, RefreshCw, AlertCircle, Download } from "lucide-react";
 
 interface ScriptViewerProps {
   id: number;
@@ -7,6 +7,7 @@ interface ScriptViewerProps {
   tagType: "DoABC" | "DoAction";
   bytecode: string;
   decompiledAS: string;
+  abcB64?: string;
   onUpdateScript?: (scriptId: number, updatedCode: string) => void;
 }
 
@@ -16,6 +17,7 @@ export default function ScriptViewer({
   tagType,
   bytecode,
   decompiledAS,
+  abcB64,
   onUpdateScript
 }: ScriptViewerProps) {
   const [activeTab, setActiveTab] = useState<"as" | "abc" | "ai">("as");
@@ -113,6 +115,67 @@ export default function ScriptViewer({
     }
   };
 
+  // Export AS ZIP from server
+  const exportAsZip = async () => {
+    if (!abcB64) {
+      setErrorMessage("ABC payload not available for export.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const resp = await fetch('/api/decompile-abc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ b64: abcB64, zip: true })
+      });
+      if (!resp.ok) {
+        const j = await resp.json();
+        throw new Error(j.error || 'Failed to export ZIP');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name || 'decompiled'}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Export failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Decompile server-side to text and show in AS tab
+  const decompileServerText = async () => {
+    if (!abcB64) {
+      setErrorMessage('ABC payload not available');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const resp = await fetch('/api/decompile-abc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ b64: abcB64 })
+      });
+      if (!resp.ok) {
+        const j = await resp.json();
+        throw new Error(j.error || 'Server decompile failed');
+      }
+      const data = await resp.json();
+      // show result in AS tab
+      setEditableCode(data.result || '');
+      setActiveTab('as');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Server decompile failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div id={`script-viewer-${id}`} className="bg-slate-900 border border-slate-700/60 rounded-xl overflow-hidden shadow-2xl transition duration-300 hover:border-slate-600/80 flex flex-col h-[525px]">
       {/* Script header */}
@@ -194,7 +257,27 @@ export default function ScriptViewer({
                 </div>
               </div>
               
-              <div className="flex justify-end pt-2 border-t border-slate-900">
+              <div className="flex justify-end pt-2 border-t border-slate-900 gap-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={decompileServerText}
+                    disabled={isLoading}
+                    className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 text-xs px-3 py-2 rounded-lg transition duration-150 flex items-center gap-2"
+                  >
+                    <Cpu className="w-4 h-4" />
+                    <span>Decompile (server)</span>
+                  </button>
+
+                  <button
+                    onClick={exportAsZip}
+                    disabled={isLoading}
+                    className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-slate-950 text-xs px-3 py-2 rounded-lg transition duration-150 flex items-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Export .AS ZIP</span>
+                  </button>
+                </div>
+
                 <button
                   onClick={handleApplyChanges}
                   className="bg-orange-500 hover:bg-orange-600 active:scale-95 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition duration-150 flex items-center gap-1.5 shadow"

@@ -699,8 +699,9 @@ export default function App() {
                           tagType={selectedPayload.tag.type === 82 ? "DoABC" : "DoAction"}
                           bytecode={bytecodeFinal}
                           decompiledAS={codeFinal}
-                          onUpdateScript={handleUpdateScriptCode}
-                        />
+                        abcB64={selectedPayload.tag.properties?.abcB64}
+                        onUpdateScript={handleUpdateScriptCode}
+                      />
                       );
                     })()
                   ) :

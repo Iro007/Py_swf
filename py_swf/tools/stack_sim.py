@@ -78,6 +78,19 @@ def extract_conditions_from_lines(lines: List[str]) -> Dict[int, str]:
                 stack.append('value')
             continue
 
+        # lookupswitch: pop a key and produce a 'switch' style condition marker
+        if mnemonic == 'lookupswitch' or mnemonic.startswith('lookupswitch'):
+            # conservative: consume one key and push a symbolic result
+            if stack:
+                key = stack.pop()
+            else:
+                key = 'key'
+            # we won't try to reconstruct cases here; just note a switch occurred
+            conds[i] = f'(switch on {key})'
+            # push placeholder result of switch
+            stack.append('switch_result')
+            continue
+
         # conditional binary
         if mnemonic in BINARY_CONDS:
             # try to pop two items
@@ -87,7 +100,7 @@ def extract_conditions_from_lines(lines: List[str]) -> Dict[int, str]:
                 op = {
                     'iflt': '<', 'ifnge': '>=', 'ifngt': '>', 'ifnle': '<=',
                     'ifge': '>=', 'ifgt': '>', 'ifle': '<=',
-                }.get(mnemonic, '??')
+                }.get(mnemonic, '==')
                 conds[i] = f'({a} {op} {b})'
             else:
                 conds[i] = '(cond?)'
@@ -110,16 +123,25 @@ def extract_conditions_from_lines(lines: List[str]) -> Dict[int, str]:
                 conds[i] = '(cond?)'
             continue
 
-        # other ops that pop known counts (callproperty pops args) -- approximate
+        # other ops that pop known counts (callproperty, callmethod, callstatic) -- approximate
         if mnemonic.startswith('call') and args:
             # callproperty <multiname> <arg_count>
             # many callers use arg_count as last arg; try to parse
             try:
                 arg_count = int(args[-1])
             except Exception:
+                # some disassemblers show callproperty <multiname> [arg_count]
                 arg_count = 0
-            # pop args
-            for _ in range(arg_count):
+                # try to find a numeric arg in args
+                for a in reversed(args):
+                    try:
+                        arg_count = int(a)
+                        break
+                    except Exception:
+                        continue
+            # pop args + target (for callproperty the target object is also on stack)
+            total_pops = arg_count + (1 if mnemonic == 'callproperty' else 0)
+            for _ in range(total_pops):
                 if stack:
                     stack.pop()
             # push return value placeholder

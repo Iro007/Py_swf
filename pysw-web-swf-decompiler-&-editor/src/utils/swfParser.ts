@@ -326,12 +326,23 @@ export function parseSWF(arrayBuffer: ArrayBuffer, filename: string): SWFFile {
         const parsedStrings = extractStringsFromABC(abcPayload);
         const decompiledAS = decompileABCStringsToActionScript(abcName || "ScriptClass", parsedStrings);
 
+        // Helper: convert Uint8Array to base64 for server-side decompilation
+        const uint8ToBase64 = (u8: Uint8Array) => {
+          let binary = '';
+          for (let i = 0; i < u8.length; i++) binary += String.fromCharCode(u8[i]);
+          return btoa(binary);
+        };
+        const abcB64 = uint8ToBase64(abcPayload);
+
         tag.properties = { 
           flags, 
           abcName,
           decompiledAS,
-          extractedStringsCount: parsedStrings.length
+          extractedStringsCount: parsedStrings.length,
+          abcB64
         };
+        // Attach abcB64 as a top-level field for convenience
+        (tag as any).abcB64 = abcB64;
         if (abcName) {
           tag.name += ` ("${abcName}")`;
         }

@@ -57,6 +57,55 @@ def recover_control_flow(pool, code: bytes) -> str:
         # Instruction
         parts = stripped.split()
         mnemonic = parts[0] if parts else ''
+
+        # handle lookupswitch specially
+        if mnemonic == 'lookupswitch' and len(parts) >= 4:
+            # parts: lookupswitch DEFAULT LIMIT [L_a, L_b]
+            default_lbl = parts[1]
+            try:
+                case_limit = int(parts[2])
+            except Exception:
+                case_limit = 0
+            case_list_raw = parts[3]
+            case_list_raw = case_list_raw.strip()
+            if case_list_raw.startswith('[') and case_list_raw.endswith(']'):
+                case_items = [c.strip() for c in case_list_raw[1:-1].split(',') if c.strip()]
+            else:
+                case_items = []
+
+            pseudo.append(f'switch (/* key */) {{')
+            # for each case label include a short body (heuristic)
+            for lbl in case_items:
+                pseudo.append(f'  case {lbl}:')
+                j = label_to_idx.get(lbl, None)
+                body_lines = []
+                if j is not None:
+                    k = j + 1
+                    while k < n and not (lines[k].strip().startswith('L_')):
+                        body_lines.append('    ' + lines[k].strip())
+                        k += 1
+                if not body_lines:
+                    body_lines.append('    // (case body omitted)')
+                pseudo.extend(body_lines)
+                pseudo.append('    break;')
+            # default
+            pseudo.append(f'  default:')
+            j = label_to_idx.get(default_lbl, None)
+            if j is not None:
+                k = j + 1
+                body_lines = []
+                while k < n and not (lines[k].strip().startswith('L_')):
+                    body_lines.append('    ' + lines[k].strip())
+                    k += 1
+                if not body_lines:
+                    body_lines.append('    // (default body omitted)')
+                pseudo.extend(body_lines)
+            else:
+                pseudo.append('    // (default body omitted)')
+            pseudo.append('}\n')
+            i += 1
+
+
         # conditional
         if mnemonic in COND_MNEMONICS and len(parts) >= 2:
             target = parts[1]
@@ -94,8 +143,7 @@ def recover_control_flow(pool, code: bytes) -> str:
                     pseudo.extend(body_lines)
                     pseudo.append('}\n')
                     i = j
-                    continue
-        # unconditional jump
+                    continue        # unconditional jump
         if mnemonic in JUMP_MNEMONICS and len(parts) >= 2:
             target = parts[1]
             tgt_idx = label_to_idx.get(target, None)

@@ -22,6 +22,28 @@ jobs:
         with:
           node-version: '18'
 
+      - name: Run Python tests
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run pytest and save junit
+        run: |
+          mkdir -p reports
+          python -m pytest -q --junitxml=reports/junit.xml
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-reports
+          path: reports
+
       - name: Build web (docker image)
         uses: docker/build-push-action@v5
         with:
