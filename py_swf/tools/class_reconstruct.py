@@ -76,9 +76,9 @@ def reconstruct_classes(abc: avm2.ABCFile, name_maps=None) -> Dict[str, str]:
         lines.append(f'{indent}public class {safe_cls} {{')
 
         # Constructor from iinit
-        cidx = getattr(inst, 'iinit', 0)
+        cidx = getattr(inst, 'iinit', None)
         ctor_body = None
-        if cidx and cidx < len(abc.methods):
+        if cidx is not None and 0 <= cidx < len(abc.methods):
             mb = method_bodies.get(cidx)
             if mb:
                 try:
