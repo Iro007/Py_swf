@@ -18,116 +18,26 @@ import py_swf.avm2 as avm2
 
 
 def build_class_files(abc: avm2.ABCFile):
-    """Return a dict mapping filename -> content for each inferred class."""
-    pool = abc.constant_pool
-    files = {}
-
-    # Try to use inferred names if available
+    """Wrapper: delegate class reconstruction to dedicated module.
+    Falls back to a simple listing if reconstruction fails.
+    """
     try:
-        from py_swf.tools.infer_names import infer_names
-        name_maps = infer_names(abc)
+        from py_swf.tools.class_reconstruct import reconstruct_classes
+        return reconstruct_classes(abc)
     except Exception:
-        name_maps = {'multiname': {}, 'string': {}}
-
-    # Helper to get readable name for an instance/class
-    def inst_name(inst_idx, inst: avm2.InstanceInfo):
-        try:
-            resolved = avm2.resolve_multiname(pool, inst.name)
-        except Exception:
-            resolved = None
-        # Prefer inferred multiname mapping
-        try:
-            if inst.name in name_maps.get('multiname', {}):
-                return name_maps['multiname'][inst.name]
-        except Exception:
-            pass
-        if resolved:
-            return resolved
-        return f"Instance_{inst_idx}"
-
-    # Map method index -> method name
-    method_names = {}
-    for mi_idx, m in enumerate(abc.methods):
-        try:
-            if m.name in name_maps.get('string', {}):
-                method_names[mi_idx] = name_maps['string'][m.name]
-            else:
-                method_names[mi_idx] = pool.strings[m.name] if m.name < len(pool.strings) else f"method_{mi_idx}"
-        except Exception:
-            method_names[mi_idx] = f"method_{mi_idx}"
-
-    # Map method index -> method body (if present)
-    method_bodies = {}
-    for mb in abc.method_bodies:
-        method_bodies[mb.method] = mb
-
-    # For each instance (class), gather traits that are methods
-    for inst_idx, inst in enumerate(abc.instances):
-        cls_name = inst_name(inst_idx, inst)
-        # Heuristic: take last segment after '::' as simple class name
-        if '::' in cls_name:
-            simple_name = cls_name.split('::')[-1]
-        else:
-            simple_name = cls_name or f'Class_{inst_idx}'
-        if not simple_name:
-            simple_name = f'Class_{inst_idx}'
-
-        lines = []
-        lines.append(f'// Decompiled class: {cls_name}')
-        lines.append('package {')
-        lines.append(f'    public class {simple_name} {{')
-        lines.append('        public function ' + simple_name + '() {')
-        lines.append('            // constructor (from iinit if available)')
-        lines.append('        }')
-        lines.append('')
-
-        # Iterate instance traits to find method traits
-        for t in inst.traits:
-            kind = t.kind_flags & 0x0F
-            # kinds 1..3 are methods/getter/setter per parser
-            if kind in (1, 2, 3):
-                method_idx = getattr(t, 'method', None)
-                if method_idx is None:
-                    continue
-                name = method_names.get(method_idx, f'method_{method_idx}')
-                func_name = name or f'method_{method_idx}'
-                lines.append(f'        // Trait kind={kind} method idx={method_idx}')
-                lines.append(f'        public function {func_name}(...args):* {{')
-                # If method body exists, embed disassembly as comment and basic blocks
-                mb = method_bodies.get(method_idx)
-                if mb:
-                    try:
-                        disasm = avm2.disassemble_instructions(pool, mb.code)
-                    except Exception as e:
-                        disasm = f'// Disassembly failed: {e}'
-                    # Include disassembly as commented block
-                    lines.append('            /* disassembly:')
-                    for dl in disasm.splitlines():
-                        lines.append('            ' + dl)
-                    lines.append('            */')
-                else:
-                    lines.append('            // no method body available in this ABC')
-                lines.append('            // TODO: reconstruct high-level body')
-                lines.append('        }')
-                lines.append('')
-
-        lines.append('    }')
-        lines.append('}')
-
-        filename = f'{simple_name}.as'
-        files[filename] = '\n'.join(lines)
-
-    # Additionally, include a top-level module that lists all classes
-    mod_lines = []
-    mod_lines.append('// Decompiled module index')
-    mod_lines.append('package {')
-    mod_lines.append('    // Classes:')
-    for fn in sorted(files.keys()):
-        mod_lines.append(f'    // - {fn}')
-    mod_lines.append('}')
-    files['module_index.txt'] = '\n'.join(mod_lines)
-
-    return files
+        # graceful fallback: produce simple stubs
+        pool = abc.constant_pool
+        files = {}
+        for inst_idx, inst in enumerate(getattr(abc, 'instances', [])):
+            try:
+                name = avm2.resolve_multiname(pool, inst.name)
+            except Exception:
+                name = f'Class_{inst_idx}'
+            safe = name.split('::')[-1] if '::' in name else name or f'Class_{inst_idx}'
+            lines = [f'// Decompiled class: {name}', 'package {', f'    public class {safe} {{', '    }', '}']
+            files[f'{safe}.as'] = '\n'.join(lines)
+        files['module_index.txt'] = '// fallback index'
+        return files
 
 
 def main():
