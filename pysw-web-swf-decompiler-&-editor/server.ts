@@ -86,6 +86,34 @@ ${bytecode || context}`;
     }
   });
 
+  // Decompile ABC server-side using bundled Python tool (POST JSON { b64 })
+  app.post('/api/decompile-abc', async (req, res) => {
+    try {
+      const { b64 } = req.body;
+      if (!b64) return res.status(400).json({ error: "Missing base64 ABC in 'b64' field" });
+
+      const cp = await import('child_process');
+      const py = cp.spawnSync('python', [
+        path.join(process.cwd(), 'py_swf', 'tools', 'decompile_abc.py'),
+        b64
+      ], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: 30 * 1000 });
+
+      if (py.error) {
+        console.error(py.error);
+        return res.status(500).json({ error: String(py.error) });
+      }
+
+      if (py.status !== 0) {
+        return res.status(500).json({ error: py.stderr || 'Python decompiler failed' });
+      }
+
+      return res.json({ result: py.stdout });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: err.message || 'Unknown error' });
+    }
+  });
+
   // Health check
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
