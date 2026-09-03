@@ -22,18 +22,37 @@ def build_class_files(abc: avm2.ABCFile):
     pool = abc.constant_pool
     files = {}
 
+    # Try to use inferred names if available
+    try:
+        from py_swf.tools.infer_names import infer_names
+        name_maps = infer_names(abc)
+    except Exception:
+        name_maps = {'multiname': {}, 'string': {}}
+
     # Helper to get readable name for an instance/class
     def inst_name(inst_idx, inst: avm2.InstanceInfo):
         try:
-            return avm2.resolve_multiname(pool, inst.name)
+            resolved = avm2.resolve_multiname(pool, inst.name)
         except Exception:
-            return f"Instance_{inst_idx}"
+            resolved = None
+        # Prefer inferred multiname mapping
+        try:
+            if inst.name in name_maps.get('multiname', {}):
+                return name_maps['multiname'][inst.name]
+        except Exception:
+            pass
+        if resolved:
+            return resolved
+        return f"Instance_{inst_idx}"
 
     # Map method index -> method name
     method_names = {}
     for mi_idx, m in enumerate(abc.methods):
         try:
-            method_names[mi_idx] = pool.strings[m.name] if m.name < len(pool.strings) else f"method_{mi_idx}"
+            if m.name in name_maps.get('string', {}):
+                method_names[mi_idx] = name_maps['string'][m.name]
+            else:
+                method_names[mi_idx] = pool.strings[m.name] if m.name < len(pool.strings) else f"method_{mi_idx}"
         except Exception:
             method_names[mi_idx] = f"method_{mi_idx}"
 
