@@ -115,14 +115,35 @@ def reconstruct_classes(abc: avm2.ABCFile, name_maps=None) -> Dict[str, str]:
                 lines.append(f'{indent*2}{decl}')
                 mb = method_bodies.get(midx)
                 if mb:
+                    # First try flow recovery to produce pseudo-code
                     try:
-                        d = avm2.disassemble_instructions(pool, mb.code)
-                    except Exception as e:
-                        d = f'// disasm failed: {e}'
-                    lines.append(f'{indent*3}/* disassembly:')
-                    for dl in d.splitlines():
-                        lines.append(f'{indent*3}{dl}')
-                    lines.append(f'{indent*3}*/')
+                        from py_swf.tools.flow_recovery import recover_control_flow
+                        pseudo = recover_control_flow(pool, mb.code)
+                    except Exception:
+                        pseudo = None
+                    if pseudo:
+                        lines.append(f'{indent*3}/* pseudo-code:')
+                        for pl in pseudo.splitlines():
+                            lines.append(f'{indent*3}{pl}')
+                        lines.append(f'{indent*3}*/')
+                        # also include raw disasm for reference
+                        try:
+                            d = avm2.disassemble_instructions(pool, mb.code)
+                        except Exception as e:
+                            d = f'// disasm failed: {e}'
+                        lines.append(f'{indent*3}/* disassembly:')
+                        for dl in d.splitlines():
+                            lines.append(f'{indent*3}{dl}')
+                        lines.append(f'{indent*3}*/')
+                    else:
+                        try:
+                            d = avm2.disassemble_instructions(pool, mb.code)
+                        except Exception as e:
+                            d = f'// disasm failed: {e}'
+                        lines.append(f'{indent*3}/* disassembly:')
+                        for dl in d.splitlines():
+                            lines.append(f'{indent*3}{dl}')
+                        lines.append(f'{indent*3}*/')
                 else:
                     lines.append(f'{indent*3}// no method body')
                 # Close
