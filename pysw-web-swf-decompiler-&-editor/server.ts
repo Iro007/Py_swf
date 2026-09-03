@@ -86,13 +86,40 @@ ${bytecode || context}`;
     }
   });
 
-  // Decompile ABC server-side using bundled Python tool (POST JSON { b64 })
+  // Decompile ABC server-side using bundled Python tool (POST JSON { b64, zip?: boolean })
   app.post('/api/decompile-abc', async (req, res) => {
     try {
-      const { b64 } = req.body;
+      const { b64, zip } = req.body as { b64?: string; zip?: boolean };
       if (!b64) return res.status(400).json({ error: "Missing base64 ABC in 'b64' field" });
 
       const cp = await import('child_process');
+
+      if (zip) {
+        // Request Python to emit a ZIP to stdout (binary)
+        const py = cp.spawnSync('python', [
+          path.join(process.cwd(), 'py_swf', 'tools', 'decompile_abc.py'),
+          b64,
+          '--zip'
+        ], { maxBuffer: 50 * 1024 * 1024, timeout: 60 * 1000 });
+
+        if (py.error) {
+          console.error(py.error);
+          return res.status(500).json({ error: String(py.error) });
+        }
+
+        if (py.status !== 0) {
+          // Try to parse stderr as JSON-friendly text
+          const stderr = py.stderr ? py.stderr.toString('utf8') : 'Python decompiler failed';
+          return res.status(500).json({ error: stderr });
+        }
+
+        const zipBuf = py.stdout as Buffer;
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename=decompiled_as3.zip');
+        return res.send(zipBuf);
+      }
+
+      // Default: text output
       const py = cp.spawnSync('python', [
         path.join(process.cwd(), 'py_swf', 'tools', 'decompile_abc.py'),
         b64
