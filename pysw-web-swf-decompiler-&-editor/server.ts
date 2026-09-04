@@ -185,7 +185,30 @@ ${bytecode || context}`;
       } else if (sig === "FWS") {
         uncompressed = buf;
       } else if (sig === "ZWS") {
-        return res.status(400).json({ error: "LZMA-compressed ZWS files are not supported by server parser." });
+        // Attempt to delegate decompression to Python helper, falling back to an informative error
+        try {
+          const cp2 = await import('child_process');
+          const py = cp2.spawnSync('python', [
+            path.join(process.cwd(), 'py_swf', 'tools', 'decompress_zws.py'),
+            // pass file path via temp file
+          ], { input: buf, maxBuffer: 200 * 1024 * 1024, timeout: 60 * 1000 });
+
+          if (py.error) {
+            console.error('ZWS helper spawn error', py.error);
+            return res.status(500).json({ error: 'Failed to spawn ZWS decompressor helper' });
+          }
+
+          if (py.status !== 0) {
+            const stderr = py.stderr ? py.stderr.toString('utf8') : 'ZWS decompressor failed';
+            console.error('ZWS decompressor stderr:', stderr);
+            return res.status(501).json({ error: 'ZWS decompression not available on server: ' + stderr });
+          }
+
+          uncompressed = Buffer.from(py.stdout);
+        } catch (e: any) {
+          console.error('ZWS handling error', e);
+          return res.status(501).json({ error: 'ZWS decompression helper failed or not available on server.' });
+        }
       } else {
         return res.status(400).json({ error: `Unknown SWF signature: ${sig}` });
       }
