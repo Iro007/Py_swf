@@ -27,6 +27,11 @@ export default function ScriptViewer({
   const [aiResult, setAiResult] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isZipModalOpen, setIsZipModalOpen] = useState<boolean>(false);
+  const [zipNames, setZipNames] = useState<string[]>([]);
+  const [zipPreviews, setZipPreviews] = useState<Record<string,string>>({});
+  const [zipBlob, setZipBlob] = useState<Blob | null>(null);
+  const [selectedZipFile, setSelectedZipFile] = useState<string | null>(null);
 
   useEffect(() => {
     setEditableCode(decompiledAS);
@@ -150,12 +155,23 @@ export default function ScriptViewer({
         const jszip = new JSZip();
         const zip = await jszip.loadAsync(blob);
         const names = Object.keys(zip.files);
-        const listPreview = names.slice(0, 200).join('\n');
-        const doDownload = window.confirm(`Archive contents:\n\n${listPreview}\n\nDownload archive?`);
-        if (!doDownload) {
-          setIsLoading(false);
-          return;
+        // store preview state and open modal
+        setZipNames(names);
+        // extract small previews for first N files
+        const previews: Record<string,string> = {};
+        for (const n of names.slice(0, 50)) {
+          try {
+            const content = await zip.file(n).async('string');
+            previews[n] = content.slice(0, 2000);
+          } catch (err) {
+            previews[n] = '(binary or unreadable)';
+          }
         }
+        setZipPreviews(previews);
+        setZipBlob(blob);
+        setIsZipModalOpen(true);
+        setIsLoading(false);
+        return; // wait for user action in modal
       } catch (e) {
         // If preview fails, fall back to direct download
         console.warn('ZIP preview failed, continuing to download', e);
@@ -383,6 +399,49 @@ export default function ScriptViewer({
                     </p>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ZIP preview modal */}
+          {isZipModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+              <div className="w-11/12 md:w-3/4 lg:w-2/3 bg-slate-950 border border-slate-800 rounded-lg p-4 shadow-xl text-slate-200 max-h-[80vh] overflow-auto">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-sm font-semibold">Archive preview</h3>
+                  <div className="flex items-center gap-2">
+                    <button className="text-xs px-3 py-1 rounded bg-slate-800/60" onClick={() => { setIsZipModalOpen(false); setZipBlob(null); }}>Close</button>
+                    <button className="text-xs px-3 py-1 rounded bg-emerald-500 text-slate-900" onClick={() => {
+                      if (!zipBlob) return;
+                      const url = URL.createObjectURL(zipBlob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `${name || 'decompiled'}.zip`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                      setIsZipModalOpen(false);
+                      setZipBlob(null);
+                    }}>Download ZIP</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="col-span-1 bg-slate-900/50 p-2 rounded border border-slate-800 h-[50vh] overflow-auto">
+                    <h4 className="text-xs text-slate-400 mb-2">Files</h4>
+                    <ul className="text-xs font-mono space-y-1">
+                      {zipNames.map(n => (
+                        <li key={n}>
+                          <button className="w-full text-left text-slate-200 hover:text-emerald-300" onClick={() => setSelectedZipFile(n)}>{n}</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="col-span-2 bg-slate-900/40 p-2 rounded border border-slate-800 h-[50vh] overflow-auto">
+                    <h4 className="text-xs text-slate-400 mb-2">Preview</h4>
+                    <pre className="whitespace-pre-wrap text-xs font-mono">{(selectedZipFile && zipPreviews[selectedZipFile]) || 'Select a file to preview (binary files show a placeholder).'}</pre>
+                  </div>
+                </div>
               </div>
             </div>
           )}
