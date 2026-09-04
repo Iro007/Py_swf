@@ -115,7 +115,9 @@ def recover_control_flow(pool, code: bytes) -> str:
             if tgt_idx is not None:
                 # if target is before current => loop
                 if tgt_idx < i:
-                    pseudo.append(f'while {cond_text} {{')
+                    # Heuristic: treat a backward conditional as a do/while when it appears at the end of
+                    # a block (common pattern: body; if(cond) jump back). This improves readability.
+                    pseudo.append(f'do {{')
                     # include body: from next line until we encounter the label target
                     j = i + 1
                     body_lines = []
@@ -125,8 +127,7 @@ def recover_control_flow(pool, code: bytes) -> str:
                     if not body_lines:
                         body_lines.append('    // (loop body omitted)')
                     pseudo.extend(body_lines)
-                    pseudo.append('    // loop continues; translated from backward branch')
-                    pseudo.append('}\n')
+                    pseudo.append(f'}} while {cond_text};\n')
                     i = j
                     continue
                 else:
