@@ -26,12 +26,30 @@ def sanitize_name(s: str) -> str:
     return name
 
 
+def _best_segment(s: str) -> str:
+    # If the string looks like dotted path, prefer the last segment
+    if not s:
+        return ''
+    if '.' in s:
+        seg = s.split('.')[-1]
+        if seg:
+            return seg
+    # prefer camelCase or underscore segments
+    for sep in ['/', '\\', '_', '-', ' ']:
+        if sep in s:
+            parts = [p for p in s.split(sep) if p]
+            if parts:
+                return parts[-1]
+    return s
+
+
 def infer_names(abc) -> Dict[str, Dict[int, str]]:
     """Return a mapping: {'multiname': {idx: name}, 'string': {idx: name}}
     Heuristics:
     - Collect candidate names from pool.strings
     - Count occurrences of multinames and string refs in instances, traits and methods
-    - Prefer more frequent names
+    - Prefer more frequent names and cleaner segments (last path segment)
+    - Disambiguate conflicts and avoid reserved words
     """
     pool = abc.constant_pool
     multiname_counts = defaultdict(int)
@@ -78,6 +96,12 @@ def infer_names(abc) -> Dict[str, Dict[int, str]]:
             except Exception:
                 pass
 
+    # Augment counts from raw pool strings frequency
+    for si, s in enumerate(getattr(pool, 'strings', [])):
+        if s:
+            # weight frequently used strings higher
+            string_counts[si] += s.count('/') + s.count('.')
+
     # Build mapping from multiname index to simplified name
     multiname_map = {}
     used = set()
@@ -93,14 +117,19 @@ def infer_names(abc) -> Dict[str, Dict[int, str]]:
         # prefer name field when present
         name_part = None
         if 'name' in mn and isinstance(mn['name'], int) and mn['name'] < len(pool.strings):
-            name_part = pool.strings[mn['name']]
+            raw = pool.strings[mn['name']]
+            name_part = _best_segment(raw)
         if not name_part:
             # fallback to namespace or placeholder
             name_part = f'prop_{idx}'
         cand = sanitize_name(name_part)
         if not cand:
             cand = f'prop_{idx}'
+        # prefer more frequent multinames by appending count hint when ambiguous
+        score = multiname_counts.get(idx, 0)
         base = cand
+        if score > 1:
+            cand = f"{base}_{score}"
         i = 1
         while cand in used:
             cand = f"{base}_{i}"
@@ -114,7 +143,8 @@ def infer_names(abc) -> Dict[str, Dict[int, str]]:
         s = pool.strings[si]
         if not s:
             continue
-        cand = sanitize_name(s)
+        raw = _best_segment(s)
+        cand = sanitize_name(raw)
         if not cand:
             continue
         base = cand

@@ -164,6 +164,28 @@ ${bytecode || context}`;
     res.json({ status: "ok" });
   });
 
+  // Accept edited ActionScript files and return a ZIP for download
+  app.post('/api/build-as-zip', async (req, res) => {
+    try {
+      const payload = req.body as { files?: Record<string,string>, filename?: string };
+      const files = payload.files || {};
+      if (!Object.keys(files).length) return res.status(400).json({ error: 'No files provided' });
+
+      const JSZip = await import('jszip');
+      const zip = new (JSZip as any)();
+      for (const [p, content] of Object.entries(files)) {
+        zip.file(p, content);
+      }
+      const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename=${payload.filename || 'patched_as'}.zip`);
+      return res.send(buf);
+    } catch (err: any) {
+      console.error('build-as-zip failed', err);
+      res.status(500).json({ error: err.message || 'Failed to build zip' });
+    }
+  });
+
   // SWF parse endpoint (JSON body with base64 file: { filename, b64 })
   app.post("/api/parse-swf", async (req, res) => {
     try {

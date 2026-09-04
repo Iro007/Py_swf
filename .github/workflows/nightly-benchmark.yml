@@ -1,0 +1,35 @@
+name: Nightly benchmark and diffs
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # daily at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run benchmark
+        run: |
+          mkdir -p reports || true
+          python py_swf/tools/benchmark.py tests/fixtures > reports/benchmark.txt || true
+      - name: Run compare
+        run: |
+          python py_swf/tools/compare_runs.py || true
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-artifacts
+          path: |
+            reports/benchmark.txt
+            reports/compare_diffs.txt
+            py_swf_outputs_current.zip
