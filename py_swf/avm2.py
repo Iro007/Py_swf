@@ -979,6 +979,12 @@ def assemble_instructions(pool, text):
         if inst_type == "lookupswitch":
             default_lbl, case_limit, case_lbls = args
             
+            # lookupswitch requires padding so that the following data is 4-byte aligned
+            # after the opcode byte. Add 0-3 padding bytes as needed.
+            pad = (4 - (len(writer.data) % 4)) % 4
+            if pad:
+                writer.write_bytes(b"\x00" * pad)
+
             # Resolve default label
             if default_lbl not in label_pcs:
                 raise ValueError(f"Label '{default_lbl}' not defined")
