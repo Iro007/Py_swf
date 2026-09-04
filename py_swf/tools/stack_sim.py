@@ -11,11 +11,14 @@ from typing import List, Dict
 # Mapping of conditional mnemonics that compare two values
 BINARY_CONDS = set([
     'iflt', 'ifge', 'ifgt', 'ifle', 'ifnlt', 'ifnge', 'ifngt', 'ifnle',
-    'ifeq_strict', 'ifstricteq', 'ifstrictne'
+    'ifstricteq', 'ifstrictne', 'iflt_u', 'ifge_u'
 ])
 
 # Single-value conditionals (compare to zero)
 UNARY_CONDS = set(['ifeq', 'ifne', 'iftrue', 'iffalse'])
+
+# Additional mnemonics that behave like pushes
+PUSH_LIKE = set(['getlex', 'getproperty', 'findproperty', 'findpropstrict', 'getslot'])
 
 
 def _parse_instr(line: str):
@@ -70,12 +73,34 @@ def extract_conditions_from_lines(lines: List[str]) -> Dict[int, str]:
             stack.append(name)
             continue
 
-        # getlex/getproperty push reference (symbolic)
-        if mnemonic in ('getlex', 'getlocal0', 'getproperty', 'findproperty', 'findpropstrict'):
+        # getlex/getproperty/getslot push reference (symbolic)
+        if mnemonic in PUSH_LIKE or mnemonic == 'getlocal0':
             if args:
                 stack.append(' '.join(args))
             else:
                 stack.append('value')
+            continue
+
+        # try to handle pushscope/pushwith as neutral (no stack effect tracked)
+        if mnemonic in ('pushscope', 'pushwith', 'popscope'):
+            continue
+
+        # support returnvalue/returnvoid as terminators (no stack push)
+        if mnemonic in ('returnvalue', 'returnvoid'):
+            stack.clear()
+            continue
+
+        # lookupswitch: pop a key and produce a 'switch' style condition marker
+        if mnemonic == 'lookupswitch' or mnemonic.startswith('lookupswitch'):
+            # conservative: consume one key and push a symbolic result
+            if stack:
+                key = stack.pop()
+            else:
+                key = 'key'
+            # we won't try to reconstruct cases here; just note a switch occurred
+            conds[i] = f'(switch on {key})'
+            # push placeholder result of switch
+            stack.append('switch_result')
             continue
 
         # lookupswitch: pop a key and produce a 'switch' style condition marker
