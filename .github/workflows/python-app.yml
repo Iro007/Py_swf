@@ -21,4 +21,16 @@ jobs:
         pip install -r requirements.txt
     - name: Run tests
       run: |
-        python tests/test_swf.py
+        python -m pytest -q
+
+    - name: Run benchmark and save output
+      run: |
+        mkdir -p reports || true
+        python py_swf/tools/benchmark.py tests/fixtures > reports/benchmark.txt || true
+
+    - name: Upload benchmark results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: reports/benchmark.txt

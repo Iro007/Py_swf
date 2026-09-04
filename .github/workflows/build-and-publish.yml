@@ -1,0 +1,74 @@
+name: Build and publish web Docker image
+
+on:
+  push:
+    branches: [ main, 'iro007-swf-web-app' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Run Python tests
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run pytest and save junit
+        run: |
+          mkdir -p reports
+          python -m pytest -q --junitxml=reports/junit.xml
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-reports
+          path: reports
+
+      - name: Build web (docker image)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./pysw-web-swf-decompiler-&-editor
+          file: ./pysw-web-swf-decompiler-&-editor/Dockerfile
+          push: true
+          tags: ${{ github.repository_owner }}/py_swf_web:latest
+          platforms: linux/amd64
+
+      - name: Create artifact (dist)
+        if: always()
+        run: |
+          if [ -d "pysw-web-swf-decompiler-&-editor/dist" ]; then
+            cd pysw-web-swf-decompiler-&-editor
+            zip -r ../web-dist.zip dist
+          fi
+      - name: Upload web-dist directory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: pysw-web-swf-decompiler-&-editor/dist
+      - name: Upload web-dist zip
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-zip
+          path: web-dist.zip

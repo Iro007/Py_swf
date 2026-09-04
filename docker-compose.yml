@@ -6,3 +6,14 @@ services:
       - ./:/app
     command: python main.py
     # Note: GUI forwarding requires X/socket mapping on host; this compose is a baseline.
+
+  web:
+    build:
+      context: ./pysw-web-swf-decompiler-&-editor
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - GEMINI_API_KEY
+    restart: unless-stopped

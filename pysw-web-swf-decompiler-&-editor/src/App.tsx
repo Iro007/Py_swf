@@ -34,6 +34,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<"preview" | "hex">("preview");
   const [errorText, setErrorText] = useState<string | null>(null);
+  const [serverResponse, setServerResponse] = useState<any | null>(null);
 
   // Load default sample on mount
   useEffect(() => {
@@ -66,6 +67,39 @@ export default function App() {
         setErrorText(null);
       } catch (err: any) {
         setErrorText(`SWF Parsing failed: ${err.message}`);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleServerParse = (file: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const arrayBuf = e.target?.result as ArrayBuffer;
+        const bytes = new Uint8Array(arrayBuf);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const b64 = btoa(binary);
+        const resp = await fetch('/api/parse-swf', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, b64 })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          setErrorText(`Server parse failed: ${data.error || resp.statusText}`);
+          setServerResponse(null);
+          return;
+        }
+        setServerResponse(data);
+        setErrorText(null);
+      } catch (err: any) {
+        setErrorText(`Server parse error: ${err.message}`);
+        setServerResponse(null);
       }
     };
     reader.readAsArrayBuffer(file);
@@ -269,6 +303,12 @@ export default function App() {
             <Upload className="w-3.5 h-3.5 text-blue-400" />
             <span>Upload SWF</span>
             <input type="file" accept=".swf" onChange={handleFileUpload} className="hidden" />
+          </label>
+
+          <label className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-850 text-slate-350 cursor-pointer border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition active:scale-95 shadow">
+            <Upload className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Parse on Server</span>
+            <input type="file" accept=".swf" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleServerParse(f); }} className="hidden" />
           </label>
 
           <button
@@ -659,8 +699,9 @@ export default function App() {
                           tagType={selectedPayload.tag.type === 82 ? "DoABC" : "DoAction"}
                           bytecode={bytecodeFinal}
                           decompiledAS={codeFinal}
-                          onUpdateScript={handleUpdateScriptCode}
-                        />
+                        abcB64={selectedPayload.tag.properties?.abcB64}
+                        onUpdateScript={handleUpdateScriptCode}
+                      />
                       );
                     })()
                   ) :

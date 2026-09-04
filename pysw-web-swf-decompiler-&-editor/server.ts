@@ -86,9 +86,178 @@ ${bytecode || context}`;
     }
   });
 
+  // Decompile ABC server-side using bundled Python tool (POST JSON { b64, zip?: boolean })
+  app.post('/api/decompile-abc', async (req, res) => {
+    try {
+      const { b64, zip } = req.body as { b64?: string; zip?: boolean };
+      if (!b64) return res.status(400).json({ error: "Missing base64 ABC in 'b64' field" });
+
+      const cp = await import('child_process');
+
+      if (zip) {
+        // Request Python to emit a ZIP to stdout (binary)
+        const py = cp.spawnSync('python', [
+          path.join(process.cwd(), 'py_swf', 'tools', 'decompile_abc.py'),
+          b64,
+          '--zip'
+        ], { maxBuffer: 50 * 1024 * 1024, timeout: 60 * 1000 });
+
+        if (py.error) {
+          console.error(py.error);
+          return res.status(500).json({ error: String(py.error) });
+        }
+
+        if (py.status !== 0) {
+          // Try to parse stderr as JSON-friendly text
+          const stderr = py.stderr ? py.stderr.toString('utf8') : 'Python decompiler failed';
+          return res.status(500).json({ error: stderr });
+        }
+
+        const zipBuf = py.stdout as Buffer;
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename=decompiled_as3.zip');
+        return res.send(zipBuf);
+      }
+
+      // Default: text output
+      const py = cp.spawnSync('python', [
+        path.join(process.cwd(), 'py_swf', 'tools', 'decompile_abc.py'),
+        b64
+      ], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: 30 * 1000 });
+
+      if (py.error) {
+        console.error(py.error);
+        return res.status(500).json({ error: String(py.error) });
+      }
+
+      if (py.status !== 0) {
+        return res.status(500).json({ error: py.stderr || 'Python decompiler failed' });
+      }
+
+      // Optionally request AI-enhanced suggestions if client asked and Gemini key is configured
+      let resultText = py.stdout;
+      if (req.body && req.body.ai && process.env.GEMINI_API_KEY) {
+        try {
+          const aiResp = await fetch(`http://localhost:${PORT}/api/decompile-ai`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bytecode: resultText, taskType: 'decompile', filename: req.body.filename || 'decompiled_tag.swf' })
+          });
+          if (aiResp.ok) {
+            const aiJson = await aiResp.json();
+            return res.json({ result: resultText, ai: aiJson.result });
+          }
+        } catch (e) {
+          console.error('AI augmentation failed:', e);
+        }
+      }
+
+      return res.json({ result: resultText });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: err.message || 'Unknown error' });
+    }
+  });
+
   // Health check
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
+  });
+
+  // Accept edited ActionScript files and return a ZIP for download
+  app.post('/api/build-as-zip', async (req, res) => {
+    try {
+      const payload = req.body as { files?: Record<string,string>, filename?: string };
+      const files = payload.files || {};
+      if (!Object.keys(files).length) return res.status(400).json({ error: 'No files provided' });
+
+      const JSZip = await import('jszip');
+      const zip = new (JSZip as any)();
+      for (const [p, content] of Object.entries(files)) {
+        zip.file(p, content);
+      }
+      const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename=${payload.filename || 'patched_as'}.zip`);
+      return res.send(buf);
+    } catch (err: any) {
+      console.error('build-as-zip failed', err);
+      res.status(500).json({ error: err.message || 'Failed to build zip' });
+    }
+  });
+
+  // SWF parse endpoint (JSON body with base64 file: { filename, b64 })
+  app.post("/api/parse-swf", async (req, res) => {
+    try {
+      const { filename, b64 } = req.body as { filename?: string; b64?: string };
+      if (!b64) return res.status(400).json({ error: "Request missing base64 payload in 'b64' field" });
+
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length < 8) return res.status(400).json({ error: "File too short to be SWF" });
+
+      const sig = buf.toString("ascii", 0, 3);
+      const version = buf.readUInt8(3);
+      const fileLength = buf.readUInt32LE(4);
+
+      let uncompressed: Buffer;
+      if (sig === "CWS") {
+        const zlib = await import("zlib");
+        const zlibPayload = buf.slice(8);
+        uncompressed = Buffer.concat([buf.slice(0, 8), zlib.inflateSync(zlibPayload)]);
+      } else if (sig === "FWS") {
+        uncompressed = buf;
+      } else if (sig === "ZWS") {
+        // Attempt to delegate decompression to Python helper, falling back to an informative error
+        try {
+          const cp2 = await import('child_process');
+          const py = cp2.spawnSync('python', [
+            path.join(process.cwd(), 'py_swf', 'tools', 'decompress_zws.py'),
+            // pass file path via temp file
+          ], { input: buf, maxBuffer: 200 * 1024 * 1024, timeout: 60 * 1000 });
+
+          if (py.error) {
+            console.error('ZWS helper spawn error', py.error);
+            return res.status(500).json({ error: 'Failed to spawn ZWS decompressor helper' });
+          }
+
+          if (py.status !== 0) {
+            const stderr = py.stderr ? py.stderr.toString('utf8') : 'ZWS decompressor failed';
+            console.error('ZWS decompressor stderr:', stderr);
+            return res.status(501).json({ error: 'ZWS decompression not available on server: ' + stderr });
+          }
+
+          uncompressed = Buffer.from(py.stdout);
+        } catch (e: any) {
+          console.error('ZWS handling error', e);
+          return res.status(501).json({ error: 'ZWS decompression helper failed or not available on server.' });
+        }
+      } else {
+        return res.status(400).json({ error: `Unknown SWF signature: ${sig}` });
+      }
+
+      const tags: Array<{ type: number; length: number; offset: number }> = [];
+      let offset = 8;
+      while (offset + 2 <= uncompressed.length) {
+        const header = uncompressed.readUInt16LE(offset);
+        offset += 2;
+        const tagType = header >> 6;
+        let tagLen = header & 0x3F;
+        if (tagLen === 0x3F) {
+          if (offset + 4 > uncompressed.length) break;
+          tagLen = uncompressed.readUInt32LE(offset);
+          offset += 4;
+        }
+        if (offset + tagLen > uncompressed.length) break;
+        tags.push({ type: tagType, length: tagLen, offset });
+        offset += tagLen;
+        if (tagType === 0) break;
+      }
+
+      return res.json({ filename: filename || "uploaded.swf", signature: sig, version, fileLength, tagsCount: tags.length, tags });
+    } catch (err: any) {
+      console.error(err);
+      return res.status(500).json({ error: err.message || String(err) });
+    }
   });
 
   // Vite middleware for development

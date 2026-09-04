@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Play, Sparkles, Code2, Cpu, FileCode, Check, Send, RotateCw, RefreshCw, AlertCircle } from "lucide-react";
+import { Play, Sparkles, Code2, Cpu, FileCode, Check, Send, RotateCw, RefreshCw, AlertCircle, Download } from "lucide-react";
 
 interface ScriptViewerProps {
   id: number;
@@ -7,6 +7,7 @@ interface ScriptViewerProps {
   tagType: "DoABC" | "DoAction";
   bytecode: string;
   decompiledAS: string;
+  abcB64?: string;
   onUpdateScript?: (scriptId: number, updatedCode: string) => void;
 }
 
@@ -16,6 +17,7 @@ export default function ScriptViewer({
   tagType,
   bytecode,
   decompiledAS,
+  abcB64,
   onUpdateScript
 }: ScriptViewerProps) {
   const [activeTab, setActiveTab] = useState<"as" | "abc" | "ai">("as");
@@ -25,6 +27,11 @@ export default function ScriptViewer({
   const [aiResult, setAiResult] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isZipModalOpen, setIsZipModalOpen] = useState<boolean>(false);
+  const [zipNames, setZipNames] = useState<string[]>([]);
+  const [zipPreviews, setZipPreviews] = useState<Record<string,string>>({});
+  const [zipBlob, setZipBlob] = useState<Blob | null>(null);
+  const [selectedZipFile, setSelectedZipFile] = useState<string | null>(null);
 
   useEffect(() => {
     setEditableCode(decompiledAS);
@@ -113,6 +120,106 @@ export default function ScriptViewer({
     }
   };
 
+  // Export AS ZIP from server with preview of ZIP contents
+  const exportAsZip = async () => {
+    if (!abcB64) {
+      setErrorMessage("ABC payload not available for export.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const resp = await fetch('/api/decompile-abc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ b64: abcB64, zip: true })
+      });
+      if (!resp.ok) {
+        const j = await resp.json();
+        throw new Error(j.error || 'Failed to export ZIP');
+      }
+      const blob = await resp.blob();
+
+      // Dynamically load JSZip from CDN to inspect contents without adding a build dependency
+      const loadScript = (src: string) => new Promise<void>((resolve, reject) => {
+        if ((window as any).JSZip) return resolve();
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load JSZip'));
+        document.head.appendChild(s);
+      });
+
+      try {
+        await loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
+        const JSZip = (window as any).JSZip;
+        const jszip = new JSZip();
+        const zip = await jszip.loadAsync(blob);
+        const names = Object.keys(zip.files);
+        // store preview state and open modal
+        setZipNames(names);
+        // extract small previews for first N files
+        const previews: Record<string,string> = {};
+        for (const n of names.slice(0, 50)) {
+          try {
+            const content = await zip.file(n).async('string');
+            previews[n] = content.slice(0, 2000);
+          } catch (err) {
+            previews[n] = '(binary or unreadable)';
+          }
+        }
+        setZipPreviews(previews);
+        setZipBlob(blob);
+        setIsZipModalOpen(true);
+        setIsLoading(false);
+        return; // wait for user action in modal
+      } catch (e) {
+        // If preview fails, fall back to direct download
+        console.warn('ZIP preview failed, continuing to download', e);
+      }
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name || 'decompiled'}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Export failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Decompile server-side to text and show in AS tab
+  const decompileServerText = async () => {
+    if (!abcB64) {
+      setErrorMessage('ABC payload not available');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const resp = await fetch('/api/decompile-abc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ b64: abcB64 })
+      });
+      if (!resp.ok) {
+        const j = await resp.json();
+        throw new Error(j.error || 'Server decompile failed');
+      }
+      const data = await resp.json();
+      // show result in AS tab
+      setEditableCode(data.result || '');
+      setActiveTab('as');
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Server decompile failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div id={`script-viewer-${id}`} className="bg-slate-900 border border-slate-700/60 rounded-xl overflow-hidden shadow-2xl transition duration-300 hover:border-slate-600/80 flex flex-col h-[525px]">
       {/* Script header */}
@@ -194,7 +301,27 @@ export default function ScriptViewer({
                 </div>
               </div>
               
-              <div className="flex justify-end pt-2 border-t border-slate-900">
+              <div className="flex justify-end pt-2 border-t border-slate-900 gap-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={decompileServerText}
+                    disabled={isLoading}
+                    className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-slate-200 text-xs px-3 py-2 rounded-lg transition duration-150 flex items-center gap-2"
+                  >
+                    <Cpu className="w-4 h-4" />
+                    <span>Decompile (server)</span>
+                  </button>
+
+                  <button
+                    onClick={exportAsZip}
+                    disabled={isLoading}
+                    className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-slate-950 text-xs px-3 py-2 rounded-lg transition duration-150 flex items-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Export .AS ZIP</span>
+                  </button>
+                </div>
+
                 <button
                   onClick={handleApplyChanges}
                   className="bg-orange-500 hover:bg-orange-600 active:scale-95 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg transition duration-150 flex items-center gap-1.5 shadow"
@@ -272,6 +399,49 @@ export default function ScriptViewer({
                     </p>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ZIP preview modal */}
+          {isZipModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+              <div className="w-11/12 md:w-3/4 lg:w-2/3 bg-slate-950 border border-slate-800 rounded-lg p-4 shadow-xl text-slate-200 max-h-[80vh] overflow-auto">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-sm font-semibold">Archive preview</h3>
+                  <div className="flex items-center gap-2">
+                    <button className="text-xs px-3 py-1 rounded bg-slate-800/60" onClick={() => { setIsZipModalOpen(false); setZipBlob(null); }}>Close</button>
+                    <button className="text-xs px-3 py-1 rounded bg-emerald-500 text-slate-900" onClick={() => {
+                      if (!zipBlob) return;
+                      const url = URL.createObjectURL(zipBlob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `${name || 'decompiled'}.zip`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                      setIsZipModalOpen(false);
+                      setZipBlob(null);
+                    }}>Download ZIP</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="col-span-1 bg-slate-900/50 p-2 rounded border border-slate-800 h-[50vh] overflow-auto">
+                    <h4 className="text-xs text-slate-400 mb-2">Files</h4>
+                    <ul className="text-xs font-mono space-y-1">
+                      {zipNames.map(n => (
+                        <li key={n}>
+                          <button className="w-full text-left text-slate-200 hover:text-emerald-300" onClick={() => setSelectedZipFile(n)}>{n}</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="col-span-2 bg-slate-900/40 p-2 rounded border border-slate-800 h-[50vh] overflow-auto">
+                    <h4 className="text-xs text-slate-400 mb-2">Preview</h4>
+                    <pre className="whitespace-pre-wrap text-xs font-mono">{(selectedZipFile && zipPreviews[selectedZipFile]) || 'Select a file to preview (binary files show a placeholder).'}</pre>
+                  </div>
+                </div>
               </div>
             </div>
           )}
